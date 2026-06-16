@@ -31,13 +31,21 @@ def calculate_cfr(df: pd.DataFrame) -> pd.DataFrame:
     gmud_deploys = gmud_deploys.rename(columns={"key": "gmud_deploy_count", "deploy_month": "year_month"})
 
     combined = pd.merge(incidents, gmud_deploys, on=["team", "year_month"], how="outer")
-    combined["incidente_count"] = combined["incidente_count"].fillna(0)
-    combined["gmud_deploy_count"] = combined["gmud_deploy_count"].fillna(0)
+    combined["incidente_count"] = combined["incidente_count"].fillna(0).astype(int)
+    combined["gmud_deploy_count"] = combined["gmud_deploy_count"].fillna(0).astype(int)
     combined["cfr_percent"] = combined.apply(
         lambda row: None if row["gmud_deploy_count"] == 0 else (row["incidente_count"] / row["gmud_deploy_count"]) * 100,
         axis=1,
     )
-    return combined[["team", "year_month", "cfr_percent"]]
+    return combined[["team", "year_month", "cfr_percent", "incidente_count", "gmud_deploy_count"]]
+
+
+def _business_days_between(start, end):
+    start_date = pd.to_datetime(start).date()
+    end_date = pd.to_datetime(end).date()
+    if pd.isna(start_date) or pd.isna(end_date) or end_date < start_date:
+        return float("nan")
+    return len(pd.bdate_range(start=start_date, end=end_date))
 
 
 def calculate_lead_time_for_changes(df: pd.DataFrame) -> pd.DataFrame:
@@ -47,7 +55,10 @@ def calculate_lead_time_for_changes(df: pd.DataFrame) -> pd.DataFrame:
         df["issuetype"].astype(str).str.lower().isin(change_issue_types) &
         (df["is_resolved"])
     ].copy()
-    changes["lead_time_days"] = (changes["resolutiondate"] - changes["created"]).dt.total_seconds() / 86400.0
+    changes["lead_time_days"] = changes.apply(
+        lambda row: _business_days_between(row["created"], row["resolutiondate"]),
+        axis=1,
+    )
     result = changes.groupby(["team", "year_month"], as_index=False)["lead_time_days"].mean()
     return result
 
@@ -77,5 +88,7 @@ def calculate_metrics_summary(df: pd.DataFrame) -> pd.DataFrame:
     summary["mttr_hours"] = summary["mttr_hours"].round(1)
     summary["lead_time_days"] = summary["lead_time_days"].round(1)
     summary["deployment_count"] = summary["deployment_count"].fillna(0).astype(int)
+    summary["incidente_count"] = summary.get("incidente_count", 0).fillna(0).astype(int)
+    summary["gmud_deploy_count"] = summary.get("gmud_deploy_count", 0).fillna(0).astype(int)
 
     return summary
