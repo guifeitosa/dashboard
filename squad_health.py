@@ -224,10 +224,12 @@ def compute_squad_health(data_path: str = DATA_PATH) -> dict:
     )
     tp_dict       = tp_series.to_dict()
     tp_months_all = sorted(tp_dict.keys())
-    all_tp_counts = [float(tp_dict[m]) for m in tp_months_all]
+    # Most recent month is WIP — excluded from every baseline (same as pages/throughput.py).
+    tp_months_closed = tp_months_all[:-1] if len(tp_months_all) > 1 else tp_months_all
+    all_tp_counts = [float(tp_dict[m]) for m in tp_months_closed]
 
-    cur_tp_win  = tp_months_all[-3:]
-    prev_tp_win = tp_months_all[-6:-3]
+    cur_tp_win  = tp_months_closed[-3:]
+    prev_tp_win = tp_months_closed[-6:-3]
     cur_tp_counts  = [float(tp_dict.get(m, 0)) for m in cur_tp_win]
     prev_tp_counts = [float(tp_dict.get(m, 0)) for m in prev_tp_win]
 
@@ -320,14 +322,28 @@ def compute_squad_health(data_path: str = DATA_PATH) -> dict:
         "cfr":        _m("CFR",        cfr_score,   cfr_val,  "%"),
     }
 
+    # Current-month DORA: last month with LT or MTTR data — same criterion as
+    # dora_executivo.py's _has_key_data filter, so both pages show the same month.
+    current_dora_month = dora_months[-1]
+    for _m in reversed(dora_months):
+        _a = aggregate_metrics_by_month(summary, _m)
+        _lt, _mt = _a.get("lead_time_days"), _a.get("mttr_hours")
+        _lt_ok = _lt is not None and not (isinstance(_lt, float) and pd.isna(_lt))
+        if _lt_ok or _mt is not None:
+            current_dora_month = _m
+            break
+    current_month_dora = aggregate_metrics_by_month(summary, current_dora_month)
+
     return {
-        "score":      round(score, 1),
-        "status":     _health_status(score),
-        "trend":      trend,
-        "metrics":    metrics,
-        "impacts":    impacts,
-        "window":     cur_dora_win,
-        "prev_score": round(prev_score, 1) if prev_score is not None else None,
+        "score":              round(score, 1),
+        "status":             _health_status(score),
+        "trend":              trend,
+        "metrics":            metrics,
+        "impacts":            impacts,
+        "window":             cur_dora_win,
+        "prev_score":         round(prev_score, 1) if prev_score is not None else None,
+        "current_dora_month": current_dora_month,
+        "current_month_dora": current_month_dora,
     }
 
 

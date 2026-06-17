@@ -18,4 +18,7 @@ def load_jira_issues_from_csv(path: str) -> pd.DataFrame:
     df["year_month"] = df["created"].dt.to_period("M").astype(str)
     df["is_resolved"] = df["resolutiondate"].notna()
 
+    if "updated" in df.columns:
+        df["updated"] = pd.to_datetime(df["updated"], errors="coerce")
+
     return df

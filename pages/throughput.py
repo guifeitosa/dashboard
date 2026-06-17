@@ -367,30 +367,43 @@ def main():
     )
     monthly["month_label"] = monthly["res_month"].apply(fmt_month)
 
-    counts_list = monthly["count"].tolist()
-    n_months = len(counts_list)
-    total = int(sum(counts_list))
-    avg_val = sum(counts_list) / n_months
+    # ── Separate WIP (most recent, in progress) from closed months ────────────
+    # The most recent month is always "in progress" and excluded from every KPI
+    # baseline, trend, health and diagnostic calculation — matching the same
+    # finalized=False rule used in metric_snapshots. It still appears in the
+    # chart, visually distinguished. When only one month exists, no WIP split.
+    monthly["is_wip"] = False
+    if len(monthly) > 1:
+        monthly.loc[monthly.index[-1], "is_wip"] = True
+        closed = monthly.iloc[:-1].copy()
+    else:
+        closed = monthly.copy()
+    wip_row = monthly[monthly["is_wip"]].iloc[0] if monthly["is_wip"].any() else None
 
-    best_row = monthly.loc[monthly["count"].idxmax()]
-    worst_row = monthly.loc[monthly["count"].idxmin()]
-    last_count = float(counts_list[-1])
+    closed_counts = closed["count"].tolist()
+    n_months = len(closed_counts)                           # closed months only
+    total = int(sum(closed_counts))
+    avg_val = sum(closed_counts) / n_months if n_months else 0.0
+
+    best_row = closed.loc[closed["count"].idxmax()] if not closed.empty else monthly.iloc[0]
+    worst_row = closed.loc[closed["count"].idxmin()] if not closed.empty else monthly.iloc[0]
+    last_count = float(closed_counts[-1]) if closed_counts else 0.0
 
     # ── Period split: first half = histórico, second half = recente ──────────
     split_idx = max(1, n_months // 2)
-    hist_counts = counts_list[:split_idx]
-    recent_counts = counts_list[split_idx:]
+    hist_counts = closed_counts[:split_idx]
+    recent_counts = closed_counts[split_idx:]
     hist_avg = sum(hist_counts) / len(hist_counts) if hist_counts else None
     recent_avg = sum(recent_counts) / len(recent_counts) if recent_counts else None
 
-    # pct_change: recente vs histórico (only meaningful with >= 3 months)
+    # pct_change: recente vs histórico (only meaningful with >= 3 closed months)
     avg_pct: float | None = None
     if hist_avg and recent_avg and hist_avg > 0 and n_months >= 3:
         avg_pct = (recent_avg - hist_avg) / hist_avg * 100
 
-    # ── Trend & health ───────────────────────────────────────────────────────
-    trend_label, trend_icon, trend_color, trend_desc = _compute_trend(counts_list, avg_val)
-    cv = (monthly["count"].std() / avg_val) if (avg_val > 0 and n_months > 1) else 0.0
+    # ── Trend & health (closed months only) ──────────────────────────────────
+    trend_label, trend_icon, trend_color, trend_desc = _compute_trend(closed_counts, avg_val)
+    cv = (closed["count"].std() / avg_val) if (avg_val > 0 and n_months > 1) else 0.0
     health_label, health_emoji, health_color, health_desc = _compute_health(
         trend_label, last_count, avg_val, cv
     )
@@ -445,12 +458,14 @@ def main():
             badge_color=avg_badge_color,
         ))
 
-    # Card 2: Total
+    # Card 2: Total (closed months only; WIP count shown as badge)
     with c2:
         st.html(_card(
             "Total no Período",
             f'<span style="color:#0f172a;">{total}</span>',
-            sub=f"{n_months} {'mês' if n_months == 1 else 'meses'}",
+            sub=f"{n_months} {'mês' if n_months == 1 else 'meses'} fechados",
+            badge=f"+ {int(wip_row['count'])} em andamento" if wip_row is not None else "",
+            badge_color="#94a3b8",
         ))
 
     # Card 3: Melhor mês — badge = % acima da média
@@ -514,14 +529,20 @@ def main():
 
     bar_sel = alt.selection_point(name="bar_click", fields=["res_month"])
 
+    # Closed bars: indigo; WIP bar: gray — is_wip column set in the split above.
     bars = (
         alt.Chart(monthly)
-        .mark_bar(color="#6366f1", cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
         .encode(
             x=alt.X("month_label:N", sort=None, title=None,
                     axis=alt.Axis(labelAngle=-30, labelFontSize=12)),
             y=alt.Y("count:Q", title="Itens concluídos", axis=alt.Axis(grid=True)),
-            opacity=alt.condition(bar_sel, alt.value(1.0), alt.value(0.65)),
+            color=alt.condition(
+                alt.datum.is_wip,
+                alt.value("#94a3b8"),   # in-progress month → gray
+                alt.value("#6366f1"),   # closed months → indigo
+            ),
+            opacity=alt.condition(bar_sel, alt.value(1.0), alt.value(0.7)),
             tooltip=[
                 alt.Tooltip("month_label:N", title="Mês"),
                 alt.Tooltip("count:Q", title="Itens"),
@@ -535,13 +556,23 @@ def main():
         .encode(y="avg:Q")
     )
     avg_label = (
-        alt.Chart(pd.DataFrame({"avg": [avg_val], "lbl": [f"Média: {avg_val:.1f}"]}))
+        alt.Chart(pd.DataFrame({"avg": [avg_val], "lbl": [f"Média (fechados): {avg_val:.1f}"]}))
         .mark_text(align="right", dx=-4, dy=-8, color="#ef4444",
                    fontSize=11, fontWeight="bold")
         .encode(y=alt.Y("avg:Q"), x=alt.value(800), text="lbl:N")
     )
+    wip_label_df = monthly[monthly["is_wip"]].copy().reset_index(drop=True)
+    wip_text = (
+        alt.Chart(wip_label_df)
+        .mark_text(align="center", dy=-10, fontSize=10, fontWeight=600, color="#94a3b8")
+        .encode(
+            x=alt.X("month_label:N", sort=None),
+            y=alt.Y("count:Q"),
+            text=alt.value("em andamento"),
+        )
+    )
     event = st.altair_chart(
-        (bars + avg_rule + avg_label)
+        (bars + avg_rule + avg_label + wip_text)
         .properties(height=300)
         .configure_view(strokeWidth=0),
         use_container_width=True,
@@ -633,18 +664,18 @@ def main():
 
         bullets: list[str] = []
 
-        # 1. Peak month
-        best_i = monthly.loc[monthly["count"].idxmax()]
+        # 1. Peak month (closed months only — WIP excluded)
+        best_i = closed.loc[closed["count"].idxmax()] if not closed.empty else monthly.iloc[0]
         bullets.append(
             f"Maior throughput em **{best_i['month_label']}** com {int(best_i['count'])} itens."
         )
 
-        # 2. Most recent month vs avg
-        last_label = monthly.iloc[-1]["month_label"]
+        # 2. Most recent CLOSED month vs avg (WIP excluded)
+        last_label = closed.iloc[-1]["month_label"] if not closed.empty else monthly.iloc[-1]["month_label"]
         last_pct = (last_count - avg_val) / avg_val * 100 if avg_val > 0 else 0
         direction = "acima" if last_pct >= 0 else "abaixo"
         bullets.append(
-            f"Mês mais recente (**{last_label}**): {int(last_count)} itens "
+            f"Último mês fechado (**{last_label}**): {int(last_count)} itens "
             f"— {abs(last_pct):.0f}% {direction} da média ({avg_val:.1f})."
         )
 
@@ -657,8 +688,8 @@ def main():
             )
 
         # 4. Consecutive run above or below avg
-        n_above = _consecutive_tail(counts_list, lambda c: c > avg_val)
-        n_below = _consecutive_tail(counts_list, lambda c: c < avg_val)
+        n_above = _consecutive_tail(closed_counts, lambda c: c > avg_val)
+        n_below = _consecutive_tail(closed_counts, lambda c: c < avg_val)
         if n_above >= 2:
             bullets.append(f"**{n_above} meses consecutivos** acima da média do período.")
         elif n_below >= 2:
@@ -671,10 +702,11 @@ def main():
     # Só aparece quando o mês mais recente cai de forma relevante vs. a média do
     # período. A decomposição é uma APROXIMAÇÃO HEURÍSTICA (ver _diagnose_drop),
     # não uma análise causal real.
+    # drop_pct: last CLOSED month vs closed baseline — WIP month never triggers this
     drop_pct = (avg_val - last_count) / avg_val * 100 if avg_val > 0 else 0.0
     if drop_pct >= DROP_THRESHOLD_PCT:
-        tp_by_month = dict(zip(monthly["res_month"], monthly["count"]))
-        period_months = monthly["res_month"].tolist()
+        tp_by_month = dict(zip(closed["res_month"], closed["count"]))
+        period_months = closed["res_month"].tolist()
         team_df = df if selected_team == "Todos" else df[df["team"] == selected_team]
         parts = _diagnose_drop(period_months, tp_by_month, team_df)
         if parts:
