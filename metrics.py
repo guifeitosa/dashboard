@@ -92,3 +92,32 @@ def calculate_metrics_summary(df: pd.DataFrame) -> pd.DataFrame:
     summary["gmud_deploy_count"] = summary.get("gmud_deploy_count", 0).fillna(0).astype(int)
 
     return summary
+
+
+def aggregate_metrics_by_month(summary_df: pd.DataFrame, year_month: str) -> dict:
+    summary_df = summary_df.copy()
+    summary_df["incidente_count"] = summary_df.get("incidente_count", 0).fillna(0).astype(int)
+    summary_df["gmud_deploy_count"] = summary_df.get("gmud_deploy_count", 0).fillna(0).astype(int)
+    summary_df["deployment_count"] = summary_df.get("deployment_count", 0).fillna(0).astype(int)
+
+    month_df = summary_df[summary_df["year_month"] == year_month]
+    if month_df.empty:
+        return {}
+
+    total_incidents = month_df["incidente_count"].sum()
+    total_gmuds = month_df["gmud_deploy_count"].sum()
+    cfr = None if total_gmuds == 0 else (total_incidents / total_gmuds) * 100
+
+    mttr = None
+    if total_incidents > 0:
+        mttr = (month_df["mttr_hours"] * month_df["incidente_count"]).sum() / total_incidents
+
+    lead_time = month_df["lead_time_days"].mean()
+    deployment_count = month_df["deployment_count"].sum()
+
+    return {
+        "cfr_percent": cfr,
+        "mttr_hours": mttr,
+        "lead_time_days": lead_time,
+        "deployment_count": deployment_count,
+    }

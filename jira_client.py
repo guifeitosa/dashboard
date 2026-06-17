@@ -122,6 +122,7 @@ def normalize_issue(issue: Dict, custom_fields: Dict[str, str]) -> Dict:
         "created": created,
         "resolutiondate": resolutiondate,
         "data_implantacao": implant_value,
+        "updated": updated,
     }
 
 
@@ -135,6 +136,7 @@ def load_issues_as_dataframe() -> pd.DataFrame:
     df["created"] = pd.to_datetime(df["created"], errors="coerce", utc=True).dt.tz_convert(None)
     df["resolutiondate"] = pd.to_datetime(df["resolutiondate"], errors="coerce", utc=True).dt.tz_convert(None)
     df["data_implantacao"] = pd.to_datetime(df["data_implantacao"], errors="coerce", utc=True).dt.tz_convert(None)
+    df["updated"] = pd.to_datetime(df["updated"], errors="coerce", utc=True).dt.tz_convert(None)
     df["team"] = df["team"].fillna("Unknown")
     df["year_month"] = df["created"].dt.to_period("M").astype(str)
     df["is_resolved"] = df["resolutiondate"].notna()
