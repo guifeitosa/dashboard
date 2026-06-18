@@ -942,6 +942,39 @@ def squad_health_score(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Shared diagnostic helpers
+# ────────────────────────────────────────────────────────────────────────────
+
+def diagnose_status_concentration(
+    open_df: pd.DataFrame,
+    ratio_threshold: float = 2.0,
+) -> Optional[str]:
+    """Return the name of the non-terminal status that holds a disproportionate
+    share of open items, or None when no bottleneck is detected.
+
+    A status is a bottleneck when its item count exceeds
+    ratio_threshold × the mean count across all non-terminal statuses.
+
+    Parameters
+    ----------
+    open_df         : DataFrame of open issues with a 'status' column.
+                      Must already be filtered to the desired team/type.
+    ratio_threshold : multiplier against the mean (default 2.0 = >2×).
+    """
+    if open_df.empty:
+        return None
+    sc = open_df.groupby("status").size()
+    active = [s for s in sc.index if s.strip().lower() not in TERMINAL_STATUSES]
+    if len(active) < 2:
+        return None
+    bk = max(active, key=lambda s: sc.get(s, 0))
+    mean_sc = sum(sc.get(s, 0) for s in active) / len(active)
+    if mean_sc > 0 and sc.get(bk, 0) / mean_sc > ratio_threshold:
+        return bk
+    return None
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Throughput diagnostic rules
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -1006,23 +1039,18 @@ def build_throughput_diagnostics(
                 "Vale dar atenção aos itens mais antigos antes que isso afete ainda mais as entregas."
             )
 
-    # Rule 2: bottleneck — non-terminal status with > 2× the mean count of open items.
+    # Rule 2: bottleneck — delegates to shared diagnose_status_concentration().
     open_now = df if team is None else df[df["team"] == team]
     open_now = open_now[~open_now["is_resolved"]]
-    if not open_now.empty:
-        sc = open_now.groupby("status").size()
-        active_st = [s for s in sc.index if s.strip().lower() not in TERMINAL_STATUSES]
-        if len(active_st) >= 2:
-            bk = max(active_st, key=lambda s: sc.get(s, 0))
-            mean_sc = sum(sc.get(s, 0) for s in active_st) / len(active_st)
-            if mean_sc > 0 and sc.get(bk, 0) / mean_sc > 2.0:
-                diag.append(
-                    f"Muitos itens estão ficando parados em **{bk}**, "
-                    "o que pode estar represando as entregas."
-                )
-                rec.append(
-                    f"Vale entender o que está travando os itens parados em **{bk}**."
-                )
+    bk = diagnose_status_concentration(open_now)
+    if bk is not None:
+        diag.append(
+            f"Muitos itens estão ficando parados em **{bk}**, "
+            "o que pode estar represando as entregas."
+        )
+        rec.append(
+            f"Vale entender o que está travando os itens parados em **{bk}**."
+        )
 
     # Rule 3: low predictability.
     if pred.get("label") == "Baixa":
@@ -1034,5 +1062,123 @@ def build_throughput_diagnostics(
             "Antes de assumir compromissos de prazo, "
             "vale entender por que o volume está tão instável."
         )
+
+    return diag, rec
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Aging diagnostic rules
+# ────────────────────────────────────────────────────────────────────────────
+
+# Minimum change needed to trigger the trend rule (avoids noise on tiny deltas).
+_AGING_TREND_AGE_DELTA  = 1.0   # days
+_AGING_TREND_CRIT_DELTA = 0.02  # fraction (2 pp)
+
+
+def build_aging_diagnostics(
+    df: pd.DataFrame,
+    team: Optional[str],
+    issuetype: Optional[str],
+    *,
+    today: Optional[datetime.date] = None,
+    prev_aging: Optional[dict] = None,
+) -> tuple[list[str], list[str]]:
+    """Interpret aging data and return (diag_items, rec_items) for display.
+
+    Three rules, evaluated independently — each fires at most once:
+      Rule 1 (Gargalo):         non-terminal status with > 2× mean open-item count.
+      Rule 2 (Tendência):       compares current avg_age / pct_critical vs. prev_aging.
+      Rule 3 (Sem Movimentação): > 20% of open items had no update in the last 14 days.
+
+    Parameters
+    ----------
+    df         : issues_raw DataFrame (raw or already prepared; idempotent).
+    team       : team filter; None = all teams.
+    issuetype  : issue-type filter; None = all types.
+    today      : reference date for age calculations (defaults to date.today()).
+    prev_aging : optional dict from a previous compute_aging() call used for Rule 2.
+                 When None, the trend rule is silently skipped.
+                 When avg_age < 0 (migration artifact), the rule is also skipped.
+
+    Returns
+    -------
+    (diag_items, rec_items) — parallel lists of strings, one entry per fired rule.
+    An empty pair means no rule fired.
+    """
+    df = prepare_df(df)
+    diag: list[str] = []
+    rec:  list[str] = []
+
+    cur = compute_aging(df, team=team, issuetype=issuetype, today=today)
+    pct_crit = (
+        (cur["bands"]["30–60d"] + cur["bands"]["60+d"]) / cur["total_open"]
+        if cur["total_open"] > 0 else 0.0
+    )
+
+    # Rule 1: bottleneck — delegates to shared diagnose_status_concentration().
+    open_now = df if team is None else df[df["team"] == team]
+    if issuetype is not None:
+        open_now = open_now[open_now["issuetype"] == issuetype]
+    open_now = open_now[~open_now["is_resolved"]]
+    bk = diagnose_status_concentration(open_now)
+    if bk is not None:
+        diag.append(f"Muitos itens estão ficando parados em **{bk}**.")
+        rec.append(f"Vale entender o que está travando os itens parados em **{bk}**.")
+
+    # Rule 2: aging trend vs. previous snapshot.
+    # Guard: skip when prev_aging is absent or has a negative avg_age (migration
+    # artifact — created date is newer than the snapshot reference date).
+    if (
+        prev_aging is not None
+        and cur["total_open"] > 0
+        and prev_aging.get("avg_age", -1) >= 0
+    ):
+        if "pct_critical" in prev_aging:
+            prev_pct_crit = prev_aging["pct_critical"]
+        else:
+            prev_pct_crit = (
+                (prev_aging["bands"]["30–60d"] + prev_aging["bands"]["60+d"])
+                / prev_aging["total_open"]
+                if prev_aging.get("total_open", 0) > 0 else 0.0
+            )
+        age_delta  = cur["avg_age"]  - prev_aging["avg_age"]
+        crit_delta = pct_crit - prev_pct_crit
+
+        worsened = (
+            age_delta  >  _AGING_TREND_AGE_DELTA
+            or crit_delta > _AGING_TREND_CRIT_DELTA
+        )
+        improved = (
+            age_delta  < -_AGING_TREND_AGE_DELTA
+            and crit_delta < _AGING_TREND_CRIT_DELTA
+        )
+
+        if worsened:
+            diag.append(
+                "Os itens abertos estão demorando mais para avançar "
+                "do que no período anterior."
+            )
+            rec.append("Vale revisar os itens mais antigos antes que o atraso aumente.")
+        elif improved:
+            diag.append(
+                "Os itens abertos estão sendo resolvidos mais rápido "
+                "que no período anterior."
+            )
+            rec.append(
+                "Continue priorizando a revisão de itens parados — está funcionando."
+            )
+
+    # Rule 3: sem movimentação — > 20% of open items with no update in 14 days.
+    sem_mov = cur["sem_movimento"]
+    if sem_mov is not None and cur["total_open"] > 0:
+        if sem_mov / cur["total_open"] > 0.20:
+            diag.append(
+                "Vários itens não tiveram nenhuma atualização recente — "
+                "podem estar esquecidos ou travados em algum bloqueio."
+            )
+            rec.append(
+                "Vale checar se esses itens ainda são prioridade, "
+                "ou se podem ser replanejados."
+            )
 
     return diag, rec

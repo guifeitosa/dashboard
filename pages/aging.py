@@ -2,9 +2,10 @@ import datetime
 
 import altair as alt
 import pandas as pd
+import sqlalchemy
 import streamlit as st
 
-from core_metrics import compute_aging, prepare_df
+from core_metrics import build_aging_diagnostics, compute_aging, prepare_df
 from db import engine
 from squad_health import render_squad_health
 
@@ -104,9 +105,40 @@ def main():
         return
 
     # ── Core calculation via core_metrics ────────────────────────────────────
-    team_arg = selected_team if selected_team != "Todos" else None
-    type_arg = selected_type if selected_type != "Todos" else None
-    aging = compute_aging(df, team=team_arg, issuetype=type_arg)
+    team_arg  = selected_team if selected_team != "Todos" else None
+    type_arg  = selected_type if selected_type != "Todos" else None
+    today_date = datetime.date.today()
+    aging = compute_aging(df, team=team_arg, issuetype=type_arg, today=today_date)
+
+    # Previous period aging — prefer metric_snapshots (accurate historical state)
+    # over the shifted-date approach (which is structurally incorrect: new items
+    # get negative ages, resolved items are excluded from both sides of the comparison).
+    # Snapshots are stored per team only (no issuetype breakdown), so they're used
+    # regardless of the issuetype filter.  Fallback: shifted-date with guard.
+    prev_period = (today_date.replace(day=1) - datetime.timedelta(days=1)).strftime("%Y-%m")
+    team_key = team_arg or "Todos"
+    with engine.connect() as _conn:
+        _snap_rows = _conn.execute(
+            sqlalchemy.text(
+                "SELECT metric_name, value FROM metric_snapshots "
+                "WHERE period = :p AND team = :t "
+                "AND metric_name IN "
+                "('aging_avg_age','aging_pct_critical','aging_total_open')"
+            ),
+            {"p": prev_period, "t": team_key},
+        ).fetchall()
+    if len(_snap_rows) == 3:
+        _snap = {r[0]: r[1] for r in _snap_rows}
+        prev_aging: dict | None = {
+            "avg_age":      _snap["aging_avg_age"],
+            "pct_critical": _snap["aging_pct_critical"],
+            "total_open":   int(_snap["aging_total_open"]),
+        }
+    else:
+        prev_aging = compute_aging(
+            df, team=team_arg, issuetype=type_arg,
+            today=today_date - datetime.timedelta(days=30),
+        )
 
     total_open = aging["total_open"]
     avg_age    = aging["avg_age"]
@@ -199,6 +231,30 @@ def main():
         (bars + labels).configure_view(strokeWidth=0),
         use_container_width=True,
     )
+
+    # ── Diagnóstico & Recomendação ────────────────────────────────────────────
+    diag_items, rec_items = build_aging_diagnostics(
+        df, team_arg, type_arg,
+        today=today_date,
+        prev_aging=prev_aging,
+    )
+    _section_label("Diagnóstico &amp; Recomendação")
+    if not diag_items:
+        st.markdown(
+            '<span style="font-size:13px;color:#94a3b8;">'
+            'Nenhum fator de destaque identificado neste período.</span>',
+            unsafe_allow_html=True,
+        )
+    else:
+        col_d, col_r = st.columns(2, gap="large")
+        with col_d:
+            st.markdown("**🔍 Diagnóstico**")
+            for d in diag_items:
+                st.markdown(f"- {d}")
+        with col_r:
+            st.markdown("**🎯 Recomendação**")
+            for r in rec_items:
+                st.markdown(f"- {r}")
 
     # ── Lista de itens ────────────────────────────────────────────────────────
     _section_label("Lista de Itens em Aberto")

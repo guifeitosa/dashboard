@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from core_metrics import compute_aging
 from db import IssueRaw, IssueTransition, MetricSnapshot, engine, init_db
 from jira_client import load_issues_and_transitions
 from metrics import calculate_metrics_summary
@@ -329,7 +330,34 @@ def main():
 
         session.commit()
 
-        # 8. Print summary
+        # 8. Aging snapshots — current state of open backlog per team.
+        # Period = current YYYY-MM; finalized=False (overwritten on every sync).
+        # Stored metrics: aging_avg_age, aging_pct_critical, aging_total_open.
+        aging_teams: list[str | None] = [None] + df["team"].dropna().unique().tolist()
+        aging_counts = {"inserted": 0, "updated": 0}
+        for team in aging_teams:
+            team_key = team or "Todos"
+            ag = compute_aging(df, team=team)
+            pct_crit = (
+                (ag["bands"]["30–60d"] + ag["bands"]["60+d"]) / ag["total_open"]
+                if ag["total_open"] > 0 else 0.0
+            )
+            for metric_name, value in [
+                ("aging_avg_age",      ag["avg_age"]),
+                ("aging_pct_critical", pct_crit),
+                ("aging_total_open",   float(ag["total_open"])),
+            ]:
+                result = upsert_snapshot(
+                    session, current_period, team_key, metric_name, value,
+                    finalized=False, force_period=current_period,
+                )
+                if result in aging_counts:
+                    aging_counts[result] += 1
+        session.commit()
+        print(f"[OK] Aging snapshots written for {len(aging_teams)} team(s): "
+              f"{aging_counts['inserted']} inserted, {aging_counts['updated']} updated")
+
+        # 9. Print summary
         print()
         print("-- Snapshot update summary " + "-" * 52)
         print(f"  Current period  : {current_period}  (finalized=False, will update on every run)")
