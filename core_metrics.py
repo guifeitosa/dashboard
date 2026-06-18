@@ -816,25 +816,32 @@ def squad_health_score(
 
     lt_sc   = score_lead_time(lt_val)   if lt_val   is not None else 50.0
     mttr_sc = score_mttr(mttr_val)      if mttr_val is not None else 50.0
-    cfr_sc  = score_cfr(cfr_val)        if cfr_val  is not None else 50.0
     tp_sc   = score_throughput(all_tp_counts, cur_tp_counts)
 
+    # CFR: when there is no data (no GMUDs with data_implantacao), redistribute
+    # its 15% weight proportionally among the other 4 metrics rather than
+    # assigning a silent 50 (neutral).  A silent 50 makes the wrong claim that
+    # the team is "average" at CFR; the truth is we simply cannot measure it yet.
+    # Redistribution means "score the team on what we can measure, at the right
+    # relative weights."  cfr_excluded=True is surfaced in the returned dict so
+    # the UI can label the CFR chip as "Sem dados" instead of a coloured score.
+    cfr_sc = score_cfr(cfr_val) if cfr_val is not None else None
+    cfr_excluded = cfr_sc is None
+
     w = SQUAD_HEALTH_WEIGHTS
-    score = (
-        lt_sc   * w["lead_time"]
-        + tp_sc * w["throughput"]
-        + aging_sc * w["aging"]
-        + mttr_sc  * w["mttr"]
-        + cfr_sc   * w["cfr"]
-    )
+    active_keys = [k for k in w if not (k == "cfr" and cfr_excluded)]
+    total_w = sum(w[k] for k in active_keys)
+    active_scores = {
+        "lead_time": lt_sc, "throughput": tp_sc, "aging": aging_sc, "mttr": mttr_sc,
+    }
+    if not cfr_excluded:
+        active_scores["cfr"] = cfr_sc
+    score = sum(active_scores[k] * w[k] for k in active_keys) / total_w
 
     # Trend & impacts
     prev_score: Optional[float] = None
     impacts: list[dict] = []
-    cur_scores = {
-        "lead_time": lt_sc, "throughput": tp_sc, "aging": aging_sc,
-        "mttr": mttr_sc, "cfr": cfr_sc,
-    }
+    cur_scores = {k: active_scores[k] for k in active_keys}
 
     if prev_dora_win:
         dora_prev  = _dora_avg(prev_dora_win)
@@ -842,21 +849,22 @@ def squad_health_score(
         mttr_prev  = dora_prev["mttr_hours"]
         cfr_prev   = dora_prev["cfr_percent"]
 
-        prev_scores = {
+        prev_scores: dict[str, float] = {
             "lead_time":  score_lead_time(lt_prev)   if lt_prev   is not None else lt_sc,
             "throughput": score_throughput(all_tp_counts, prev_tp_counts),
             "aging":      aging_sc,
             "mttr":       score_mttr(mttr_prev)       if mttr_prev is not None else mttr_sc,
-            "cfr":        score_cfr(cfr_prev)         if cfr_prev  is not None else cfr_sc,
         }
+        if not cfr_excluded:
+            prev_scores["cfr"] = score_cfr(cfr_prev) if cfr_prev is not None else cfr_sc
 
-        prev_score = sum(prev_scores[k] * w[k] for k in w)
+        prev_score = sum(prev_scores[k] * w[k] for k in active_keys) / total_w
 
         labels = {
             "lead_time": "Lead Time", "throughput": "Throughput",
             "aging": "Aging", "mttr": "MTTR", "cfr": "CFR",
         }
-        for k in w:
+        for k in active_keys:
             delta = (cur_scores[k] - prev_scores[k]) * w[k]
             if abs(delta) >= 0.5:
                 impacts.append({"key": k, "label": labels[k], "delta_points": round(delta, 1)})
@@ -893,7 +901,11 @@ def squad_health_score(
         "throughput": _m("Throughput", tp_sc,    tp_avg,   "itens/mês"),
         "aging":      _m("Aging",      aging_sc, float(n_red), "itens >30d"),
         "mttr":       _m("MTTR",       mttr_sc,  mttr_val, "horas"),
-        "cfr":        _m("CFR",        cfr_sc,   cfr_val,  "%"),
+        "cfr": (
+            _m("CFR", cfr_sc, cfr_val, "%") if not cfr_excluded
+            else {"label": "CFR", "score": None, "status": "Sem dados",
+                  "emoji": "⚪", "value": None, "unit": "%"}
+        ),
     }
 
     # Current-month DORA: latest month with LT or MTTR data
@@ -918,4 +930,5 @@ def squad_health_score(
         "prev_score":         round(prev_score, 1) if prev_score is not None else None,
         "current_dora_month": current_dora_month,
         "current_month_dora": current_month_dora,
+        "cfr_excluded":       cfr_excluded,
     }

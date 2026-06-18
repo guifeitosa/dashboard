@@ -1,14 +1,12 @@
 import calendar
-import datetime
 import re
 
 import pandas as pd
 import streamlit as st
 
-from loader import load_jira_issues_from_csv
+from core_metrics import compute_aging, prepare_df
+from db import engine
 from squad_health import compute_squad_health, render_squad_health
-
-DATA_PATH = "data/jira_issues_synthetic.csv"
 
 _LEVEL_COLOR = {
     "Elite": "#15803d", "High": "#22c55e",
@@ -116,16 +114,13 @@ def main():
     render_squad_health()
 
     # ── Single data load, reused throughout ──────────────────────────────────
-    h  = compute_squad_health(DATA_PATH)
-    df = load_jira_issues_from_csv(DATA_PATH)
+    h = compute_squad_health()
 
-    # Aging open-issue stats (same logic as pages/aging.py)
-    open_issues = df[~df["is_resolved"]].copy()
-    today = pd.Timestamp(datetime.date.today())
-    open_issues["dias_parado"] = (today - open_issues["created"]).dt.days
-    total_open = len(open_issues)
-    n_red = int((open_issues["dias_parado"] > 30).sum())
-    pct_red = n_red / total_open * 100 if total_open > 0 else 0.0
+    df = prepare_df(pd.read_sql("SELECT * FROM issues_raw", engine))
+    aging = compute_aging(df)
+    total_open = aging["total_open"]
+    n_red      = aging["bands"]["30–60d"] + aging["bands"]["60+d"]
+    pct_red    = n_red / total_open * 100 if total_open > 0 else 0.0
 
     # DORA values: single-month view, same period dora_executivo.py calls "Último mês"
     # (current_month_dora comes from aggregate_metrics_by_month on the latest DORA month)
@@ -221,8 +216,10 @@ def main():
             f'</div>'
         )
     else:
-        # No deterioration detected — show metric with most room to improve
-        all_scored = sorted(h["metrics"].items(), key=lambda x: x[1]["score"])
+        # No deterioration detected — show metric with most room to improve.
+        # Exclude CFR when score is None (excluded from scoring — no data).
+        scored_metrics = [(k, m) for k, m in h["metrics"].items() if m["score"] is not None]
+        all_scored = sorted(scored_metrics, key=lambda x: x[1]["score"])
         low_key, low_m = all_scored[0] if all_scored else ("N/A", {"label": "—", "score": 0})
         msg = (
             "Sem janela histórica para comparação." if not impacts else
