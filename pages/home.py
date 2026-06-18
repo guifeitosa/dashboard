@@ -6,7 +6,7 @@ import streamlit as st
 
 from core_metrics import compute_aging, prepare_df
 from db import engine
-from squad_health import compute_squad_health, render_squad_health
+from squad_health import compute_squad_health, render_context_bar, render_squad_health
 
 _LEVEL_COLOR = {
     "Elite": "#15803d", "High": "#22c55e",
@@ -112,6 +112,7 @@ def _alert_card(items: list[tuple[str, str]]) -> None:
 
 def main():
     render_squad_health()
+    render_context_bar()
 
     # ── Single data load, reused throughout ──────────────────────────────────
     _global = st.session_state.get("global_team", "Todos")

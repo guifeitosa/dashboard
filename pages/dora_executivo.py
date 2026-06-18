@@ -6,7 +6,7 @@ import streamlit as st
 from core_metrics import build_dora_diagnostics, dora_band, prepare_df
 from db import engine
 from metrics import aggregate_metrics_by_month, calculate_metrics_summary
-from squad_health import render_squad_health
+from squad_health import render_context_bar, render_squad_health
 
 MONTH_PT = {
     "01": "JAN", "02": "FEV", "03": "MAR", "04": "ABR",
@@ -172,6 +172,7 @@ def add_deploy_freq_interval(df: pd.DataFrame) -> pd.DataFrame:
 def main():
     # set_page_config is handled in app.py (navigation entry point)
     render_squad_health()
+    _ctx = st.empty()
 
     df = _load_issues()
     summary = calculate_metrics_summary(df)
@@ -186,6 +187,9 @@ def main():
     else:
         selected_start = selected_end = months[0]
         st.sidebar.write(f"Período: {fmt_month(months[0])}")
+
+    with _ctx:
+        render_context_bar(period=f"{fmt_month(selected_start)} — {fmt_month(selected_end)}")
 
     if selected_start > selected_end:
         st.warning("Período inválido: início deve ser anterior ao fim.")

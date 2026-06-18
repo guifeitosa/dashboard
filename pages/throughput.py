@@ -9,7 +9,7 @@ from core_metrics import (
     prepare_df,
 )
 from db import engine
-from squad_health import render_squad_health
+from squad_health import render_context_bar, render_squad_health
 
 MONTH_PT = {
     "01": "JAN", "02": "FEV", "03": "MAR", "04": "ABR",
@@ -192,6 +192,7 @@ def _month_detail(month_ym: str, filt_df: pd.DataFrame, monthly_df: pd.DataFrame
 
 def main():
     render_squad_health()
+    _ctx = st.empty()
 
     df = _load_issues()
 
@@ -220,6 +221,9 @@ def main():
         else:
             selected_end = months[0]
             st.caption(f"Até: {fmt_month(months[0])}")
+
+    with _ctx:
+        render_context_bar(period=f"{fmt_month(selected_start)} — {fmt_month(selected_end)}")
 
     if selected_start > selected_end:
         st.warning("Período inválido: início deve ser anterior ao fim.")

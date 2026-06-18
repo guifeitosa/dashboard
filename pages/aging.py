@@ -7,7 +7,7 @@ import streamlit as st
 
 from core_metrics import build_aging_diagnostics, compute_aging, prepare_df
 from db import engine
-from squad_health import render_squad_health
+from squad_health import render_context_bar, render_squad_health
 
 OVER_REP_THRESHOLD = 15  # pp
 
@@ -64,6 +64,7 @@ def _section_label(text: str) -> None:
 
 def main():
     render_squad_health()
+    render_context_bar()
 
     df = _load_issues()
 

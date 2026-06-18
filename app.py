@@ -19,6 +19,11 @@ st.markdown(
 [data-testid="stAppViewContainer"] { background: #f1f5f9; }
 [data-testid="block-container"] { padding-top: 1.2rem; padding-bottom: 2rem; }
 section[data-testid="stSidebar"] > div { background: white; }
+section[data-testid="stSidebar"] .stSelectbox div[data-baseweb="select"] > div:first-child {
+    border: 2px solid #818cf8 !important;
+    border-radius: 8px !important;
+    background: #f5f3ff !important;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -51,7 +56,12 @@ _teams = _get_teams()
 if "global_team" not in st.session_state:
     st.session_state["global_team"] = "Todos"
 with st.sidebar:
-    st.selectbox("Time", options=_teams, key="global_team")
+    st.markdown(
+        '<div style="font-size:11px;font-weight:700;color:#6366f1;text-transform:uppercase;'
+        'letter-spacing:.07em;margin-bottom:4px;">Visualizando dados de:</div>',
+        unsafe_allow_html=True,
+    )
+    st.selectbox("Time", options=_teams, key="global_team", label_visibility="collapsed")
 
 _selected = st.session_state.get("global_team", "Todos")
 _team_arg = None if _selected == "Todos" else _selected
