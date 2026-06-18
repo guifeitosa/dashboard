@@ -7,11 +7,20 @@ Run from the project root:
 What is generated
 -----------------
 - 7 months of history  (TODAY-6 months … TODAY)
-- ~250 issues across 3 fixed teams: "Time Alpha", "Time Beta", "Time Gamma"
-- Types: GMUD (deploys), História (user stories), Incidente
+- ~300+ issues across 3 fixed teams: "Time Alpha", "Time Beta", "Time Gamma"
+- Types: GMUD (deploys), História (user stories), Incidente, Subtask
+- História full flow: Backlog → Discovery → Design → Pronto pra Refinamento →
+  Em Refinamento → Pronto pra desenvolvimento → Sprint Backlog →
+  Em desenvolvimento → Pronto pra testes → Em testes → Revisão de Produto →
+  Pronto pra produção → Concluído
+- Subtask flow: Sprint Backlog → Em desenvolvimento → Code Review → Concluído
+- 0–3 subtasks per História
+- 3 diagnostic scenarios:
+    a. Subtasks todas Concluídas mas História pai ainda em status aberto
+    b. Subtasks presas em Code Review há >5 dias
+    c. Histórias em "Revisão de Produto" / "Pronto pra produção" há >3 dias
 - Lead Time 1–7 business days, MTTR 2–20 h, CFR oscillating good/bad by month
 - At least one month with >30/60d Aging and a visible status bottleneck
-- issue_transitions with realistic timestamps (not all in the same second)
 - metric_snapshots derived by running the REAL core_metrics functions — no
   invented numbers
 """
@@ -23,14 +32,12 @@ import random
 import sys
 from pathlib import Path
 
-# Make project root importable regardless of where the script is called from.
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import pandas as pd
 from sqlalchemy.orm import Session
 
-# Point to the demo DB before importing db.py so the engine picks it up.
 os.environ.setdefault("DASHBOARD_DB_PATH", str(ROOT / "metrics_demo.db"))
 
 from db import Base, IssueRaw, IssueTransition, MetricSnapshot, engine, init_db
@@ -44,7 +51,32 @@ random.seed(42)
 # ── Constants ─────────────────────────────────────────────────────────────────
 TODAY = datetime.date(2026, 6, 18)
 TEAMS = ["Time Alpha", "Time Beta", "Time Gamma"]
-STATUSES_ACTIVE = ["A Fazer", "Em Andamento", "Em Revisão", "Aguardando Deploy"]
+
+# Full flow for user stories (Histórias)
+HISTORIA_FLOW = [
+    "Backlog",
+    "Discovery",
+    "Design",
+    "Pronto pra Refinamento",
+    "Em Refinamento",
+    "Pronto pra desenvolvimento",
+    "Sprint Backlog",
+    "Em desenvolvimento",
+    "Pronto pra testes",
+    "Em testes",
+    "Revisão de Produto",
+    "Pronto pra produção",
+    "Concluído",
+]
+HISTORIA_DONE = "Concluído"
+# Indices of valid open statuses (excludes terminal "Concluído" and near-terminal "Pronto pra produção")
+HISTORIA_OPEN_RANGE = list(range(1, len(HISTORIA_FLOW) - 2))
+
+# Flow for subtasks
+SUBTASK_FLOW = ["Sprint Backlog", "Em desenvolvimento", "Code Review", "Concluído"]
+SUBTASK_DONE = "Concluído"
+
+# Simple flow for support types (GMUDs, Incidentes)
 STATUS_DONE = "Feito"
 
 # Month boundaries: last 7 complete months + current month
@@ -67,7 +99,6 @@ def _rand_dt(date: datetime.date, hour_range=(8, 19)) -> datetime.datetime:
     return datetime.datetime(date.year, date.month, date.day, h, m, s)
 
 def _add_bdays(d: datetime.date, n: int) -> datetime.date:
-    """Add n business days."""
     while n > 0:
         d += datetime.timedelta(days=1)
         if d.weekday() < 5:
@@ -84,120 +115,6 @@ def _next_key() -> str:
     return f"DEMO-{_issue_counter:04d}"
 
 
-def _make_gmud(
-    team: str,
-    month_start: datetime.date,
-    cfr_risky: bool,
-) -> tuple[dict, list[dict]]:
-    """One GMUD deploy.  cfr_risky=True increases chance of generating incidents."""
-    key = _next_key()
-    # Created somewhere in the month, deployed a few days later
-    created_day = random.randint(1, 20)
-    created = _rand_dt(month_start.replace(day=min(created_day, _month_end(month_start).day)))
-    implant_offset = random.randint(1, 5)
-    implant_date = _add_bdays(created.date(), implant_offset)
-    if implant_date > _month_end(month_start):
-        implant_date = _month_end(month_start)
-    implant_dt = _rand_dt(implant_date)
-    resolution_dt = implant_dt + datetime.timedelta(hours=random.randint(1, 4))
-
-    issue = {
-        "key": key,
-        "issuetype": "GMUD",
-        "team": team,
-        "status": STATUS_DONE,
-        "created": created,
-        "resolutiondate": resolution_dt,
-        "data_implantacao": implant_dt,
-        "updated": resolution_dt,
-    }
-
-    transitions = _make_transitions(
-        key, team, created,
-        statuses=["A Fazer", "Em Andamento", STATUS_DONE],
-        resolution_dt=resolution_dt,
-    )
-    return issue, transitions
-
-
-def _make_historia(
-    team: str,
-    month_start: datetime.date,
-    lead_time_days: int,
-    resolved: bool = True,
-    created_override: datetime.date | None = None,
-) -> tuple[dict, list[dict]]:
-    key = _next_key()
-    base_day = created_override or month_start.replace(
-        day=random.randint(1, max(1, _month_end(month_start).day - lead_time_days - 1))
-    )
-    created = _rand_dt(base_day)
-
-    if resolved:
-        res_day = _add_bdays(base_day, lead_time_days)
-        res_dt = _rand_dt(res_day, hour_range=(14, 20))
-        status = STATUS_DONE
-        updated = res_dt
-    else:
-        res_dt = None
-        status = random.choice(STATUSES_ACTIVE)
-        updated = _rand_dt(
-            base_day + datetime.timedelta(days=random.randint(0, 5))
-        )
-
-    issue = {
-        "key": key,
-        "issuetype": "História",
-        "team": team,
-        "status": status,
-        "created": created,
-        "resolutiondate": res_dt,
-        "data_implantacao": None,
-        "updated": updated,
-    }
-
-    if resolved:
-        transitions = _make_transitions(
-            key, team, created,
-            statuses=["A Fazer", "Em Andamento", "Em Revisão", STATUS_DONE],
-            resolution_dt=res_dt,
-        )
-    else:
-        partial = ["A Fazer", "Em Andamento", "Em Revisão"][:STATUSES_ACTIVE.index(status) + 1]
-        transitions = _make_transitions(key, team, created, statuses=partial, resolution_dt=None)
-
-    return issue, transitions
-
-
-def _make_incidente(
-    team: str,
-    month_start: datetime.date,
-    mttr_hours: float,
-) -> tuple[dict, list[dict]]:
-    key = _next_key()
-    day = random.randint(1, _month_end(month_start).day)
-    created = _rand_dt(month_start.replace(day=day), hour_range=(0, 22))
-    res_dt = created + datetime.timedelta(hours=mttr_hours + random.uniform(-1, 1))
-
-    issue = {
-        "key": key,
-        "issuetype": "Incidente",
-        "team": team,
-        "status": STATUS_DONE,
-        "created": created,
-        "resolutiondate": res_dt,
-        "data_implantacao": None,
-        "updated": res_dt,
-    }
-
-    transitions = _make_transitions(
-        key, team, created,
-        statuses=["Em Andamento", STATUS_DONE],
-        resolution_dt=res_dt,
-    )
-    return issue, transitions
-
-
 def _make_transitions(
     key: str,
     team: str,
@@ -210,7 +127,6 @@ def _make_transitions(
     if n < 2:
         return transitions
 
-    # Spread transition timestamps between created and resolution (or +2 days)
     end = resolution_dt or (created + datetime.timedelta(days=2))
     total_seconds = max(1, (end - created).total_seconds())
     step = total_seconds / (n - 1)
@@ -229,23 +145,174 @@ def _make_transitions(
     return transitions
 
 
+def _make_gmud(
+    team: str,
+    month_start: datetime.date,
+    cfr_risky: bool,
+) -> tuple[dict, list[dict]]:
+    key = _next_key()
+    created_day = random.randint(1, 20)
+    created = _rand_dt(month_start.replace(day=min(created_day, _month_end(month_start).day)))
+    implant_offset = random.randint(1, 5)
+    implant_date = _add_bdays(created.date(), implant_offset)
+    if implant_date > _month_end(month_start):
+        implant_date = _month_end(month_start)
+    implant_dt = _rand_dt(implant_date)
+    resolution_dt = implant_dt + datetime.timedelta(hours=random.randint(1, 4))
+
+    issue = {
+        "key": key,
+        "issuetype": "GMUD",
+        "team": team,
+        "parent_key": None,
+        "status": STATUS_DONE,
+        "created": created,
+        "resolutiondate": resolution_dt,
+        "data_implantacao": implant_dt,
+        "updated": resolution_dt,
+    }
+    transitions = _make_transitions(
+        key, team, created,
+        statuses=["A Fazer", "Em Andamento", STATUS_DONE],
+        resolution_dt=resolution_dt,
+    )
+    return issue, transitions
+
+
+def _make_incidente(
+    team: str,
+    month_start: datetime.date,
+    mttr_hours: float,
+) -> tuple[dict, list[dict]]:
+    key = _next_key()
+    day = random.randint(1, _month_end(month_start).day)
+    created = _rand_dt(month_start.replace(day=day), hour_range=(0, 22))
+    res_dt = created + datetime.timedelta(hours=mttr_hours + random.uniform(-1, 1))
+
+    issue = {
+        "key": key,
+        "issuetype": "Incidente",
+        "team": team,
+        "parent_key": None,
+        "status": STATUS_DONE,
+        "created": created,
+        "resolutiondate": res_dt,
+        "data_implantacao": None,
+        "updated": res_dt,
+    }
+    transitions = _make_transitions(
+        key, team, created,
+        statuses=["Em Andamento", STATUS_DONE],
+        resolution_dt=res_dt,
+    )
+    return issue, transitions
+
+
+def _make_historia(
+    team: str,
+    month_start: datetime.date,
+    lead_time_days: int,
+    resolved: bool = True,
+    created_override: datetime.date | None = None,
+    stop_at: str | None = None,
+) -> tuple[dict, list[dict]]:
+    """
+    stop_at: when resolved=False, force this specific status from HISTORIA_FLOW.
+    If None and resolved=False, pick randomly from non-terminal positions.
+    """
+    key = _next_key()
+    base_day = created_override or month_start.replace(
+        day=random.randint(1, max(1, _month_end(month_start).day - lead_time_days - 1))
+    )
+    created = _rand_dt(base_day)
+
+    if resolved:
+        res_day = _add_bdays(base_day, lead_time_days)
+        res_dt = _rand_dt(res_day, hour_range=(14, 20))
+        status = HISTORIA_DONE
+        updated = res_dt
+        statuses = HISTORIA_FLOW
+    else:
+        res_dt = None
+        if stop_at is not None and stop_at in HISTORIA_FLOW:
+            idx = HISTORIA_FLOW.index(stop_at)
+        else:
+            idx = random.choice(HISTORIA_OPEN_RANGE)
+        status = HISTORIA_FLOW[idx]
+        updated = _rand_dt(base_day + datetime.timedelta(days=random.randint(0, lead_time_days)))
+        statuses = HISTORIA_FLOW[:idx + 1]
+
+    issue = {
+        "key": key,
+        "issuetype": "História",
+        "team": team,
+        "parent_key": None,
+        "status": status,
+        "created": created,
+        "resolutiondate": res_dt,
+        "data_implantacao": None,
+        "updated": updated,
+    }
+    transitions = _make_transitions(key, team, created, statuses=statuses, resolution_dt=res_dt)
+    return issue, transitions
+
+
+def _make_subtask(
+    parent_key: str,
+    team: str,
+    parent_created: datetime.datetime,
+    resolved: bool = True,
+    stuck_in_code_review: bool = False,
+) -> tuple[dict, list[dict]]:
+    """Subtask flow: Sprint Backlog → Em desenvolvimento → Code Review → Concluído."""
+    key = _next_key()
+    created = parent_created + datetime.timedelta(hours=random.randint(2, 24))
+
+    if stuck_in_code_review:
+        status = "Code Review"
+        res_dt = None
+        updated_date = TODAY - datetime.timedelta(days=random.randint(6, 12))
+        updated = _rand_dt(updated_date)
+        statuses = SUBTASK_FLOW[:3]  # Sprint Backlog → Em desenvolvimento → Code Review
+    elif resolved:
+        lt_days = random.randint(1, 5)
+        res_day = _add_bdays(created.date(), lt_days)
+        res_dt = _rand_dt(res_day, hour_range=(14, 20))
+        status = SUBTASK_DONE
+        updated = res_dt
+        statuses = SUBTASK_FLOW
+    else:
+        idx = random.randint(1, 2)
+        status = SUBTASK_FLOW[idx]
+        res_dt = None
+        updated = _rand_dt(created.date() + datetime.timedelta(days=random.randint(0, 3)))
+        statuses = SUBTASK_FLOW[:idx + 1]
+
+    issue = {
+        "key": key,
+        "issuetype": "Subtask",
+        "team": team,
+        "parent_key": parent_key,
+        "status": status,
+        "created": created,
+        "resolutiondate": res_dt,
+        "data_implantacao": None,
+        "updated": updated,
+    }
+    transitions = _make_transitions(key, team, created, statuses=statuses, resolution_dt=res_dt)
+    return issue, transitions
+
+
 # ── Per-month issue generation plan ──────────────────────────────────────────
-#
-# CFR target (incidents / GMUDs * 100):
-#   "good"  months: ~5–15 %
-#   "risky" months: ~25–40 %
-#
-# Aging bad month: month index 2 (3rd oldest) — many unresolved histories.
-# Bottleneck month: same month — most open items stuck in "Em Revisão".
 
 def _plan_month(month_idx: int, month_start: datetime.date):
-    """Return lists of (issue_dict, [transition_dict, ...]) for one month."""
+    """Return list of (issue_dict, [transition_dict, ...]) for one month."""
     results: list[tuple[dict, list[dict]]] = []
 
-    # Risk profile alternates good/bad/good/bad…
     cfr_risky = month_idx in (1, 3, 5)
     is_aging_bad_month = (month_idx == 2)
     is_current_month = (month_start == MONTHS[-1])
+    is_recent = month_idx >= 4  # 3 most recent months get diagnostic scenarios
 
     for team in TEAMS:
         # ── GMUDs ──────────────────────────────────────────────────────────────
@@ -254,8 +321,6 @@ def _plan_month(month_idx: int, month_start: datetime.date):
             results.append(_make_gmud(team, month_start, cfr_risky))
 
         # ── Incidentes ─────────────────────────────────────────────────────────
-        # Good months guarantee 1 incident per team so MTTR is never null.
-        # Bad months have 2-3, raising CFR noticeably.
         if cfr_risky:
             n_incidents = random.randint(2, 3)
             mttr_base = random.uniform(6, 18)
@@ -266,34 +331,72 @@ def _plan_month(month_idx: int, month_start: datetime.date):
         for _ in range(n_incidents):
             results.append(_make_incidente(team, month_start, mttr_base + random.uniform(-1, 2)))
 
-        # ── Histórias ─────────────────────────────────────────────────────────
+        # ── Histórias com subtasks ─────────────────────────────────────────────
         n_stories = random.randint(8, 14)
         for _ in range(n_stories):
             lt = random.randint(1, 7)
-            results.append(_make_historia(team, month_start, lt, resolved=True))
+            hist, hist_tr = _make_historia(team, month_start, lt, resolved=True)
+            results.append((hist, hist_tr))
+            parent_key = hist["key"]
+            for _ in range(random.randint(0, 3)):
+                results.append(_make_subtask(parent_key, team, hist["created"], resolved=True))
 
-        # ── Aging bad month: add a batch of OPEN items created early in month ─
+        # ── Aging bad month: items stuck in Em testes ──────────────────────────
         if is_aging_bad_month:
-            # 12 open items per team created on day 1 of that month (will be
-            # 60+ days old when viewed from TODAY ~2 months later).
             for _ in range(12):
                 old_day = month_start + datetime.timedelta(days=random.randint(0, 3))
-                # These items are intentionally stuck "Em Revisão" — bottleneck
                 issue_d, tr_d = _make_historia(
                     team, month_start,
                     lead_time_days=3,
                     resolved=False,
                     created_override=old_day,
                 )
-                # Force status to "Em Revisão" to create the concentration signal
-                issue_d["status"] = "Em Revisão"
+                issue_d["status"] = "Em testes"
                 results.append((issue_d, tr_d))
 
-        # ── Current month: add open items in progress ──────────────────────────
+        # ── Current month: open items ──────────────────────────────────────────
         if is_current_month:
             for _ in range(random.randint(3, 6)):
                 lt = random.randint(1, 3)
-                results.append(_make_historia(team, month_start, lt, resolved=False))
+                hist, hist_tr = _make_historia(team, month_start, lt, resolved=False)
+                results.append((hist, hist_tr))
+                parent_key = hist["key"]
+                for _ in range(random.randint(0, 2)):
+                    results.append(_make_subtask(parent_key, team, hist["created"], resolved=False))
+
+        # ── Scenario a: subtasks Concluídas, pai ainda aberto (Time Alpha) ────
+        if is_recent and team == "Time Alpha":
+            hist, hist_tr = _make_historia(
+                team, month_start, lead_time_days=10,
+                resolved=False, stop_at="Revisão de Produto",
+            )
+            results.append((hist, hist_tr))
+            parent_key = hist["key"]
+            for _ in range(random.randint(2, 3)):
+                results.append(_make_subtask(parent_key, team, hist["created"], resolved=True))
+
+        # ── Scenario b: subtasks presas em Code Review >5 dias (Time Beta) ────
+        if is_recent and team == "Time Beta":
+            hist, hist_tr = _make_historia(
+                team, month_start, lead_time_days=10,
+                resolved=False, stop_at="Em desenvolvimento",
+            )
+            results.append((hist, hist_tr))
+            parent_key = hist["key"]
+            for _ in range(random.randint(1, 2)):
+                results.append(_make_subtask(
+                    parent_key, team, hist["created"], stuck_in_code_review=True,
+                ))
+
+        # ── Scenario c: Histórias em Revisão/Pronto há >3 dias (Time Gamma) ──
+        if is_recent and team == "Time Gamma":
+            stop_status = random.choice(["Revisão de Produto", "Pronto pra produção"])
+            hist, hist_tr = _make_historia(
+                team, month_start, lead_time_days=14,
+                resolved=False, stop_at=stop_status,
+            )
+            hist["updated"] = _rand_dt(TODAY - datetime.timedelta(days=random.randint(4, 7)))
+            results.append((hist, hist_tr))
 
     return results
 
@@ -301,7 +404,6 @@ def _plan_month(month_idx: int, month_start: datetime.date):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    # Wipe and recreate schema
     Base.metadata.drop_all(engine)
     init_db()
     print(f"[OK] Schema ready — {engine.url}")
@@ -326,9 +428,10 @@ def main():
                 key=r["key"],
                 issuetype=r["issuetype"],
                 team=r["team"],
+                parent_key=r.get("parent_key"),
                 status=r["status"],
                 created=r["created"],
-                resolutiondate=r["resolutiondate"],
+                resolutiondate=r.get("resolutiondate"),
                 data_implantacao=r.get("data_implantacao"),
                 updated=r.get("updated"),
                 synced_at=now,
@@ -392,11 +495,10 @@ def main():
                     if result in snap_counts:
                         snap_counts[result] += 1
 
-        # ── Aging snapshots ── per-team + "Todos" per period ─────────────────
+        # ── Aging snapshots per-team + "Todos" per period ─────────────────────
         aging_teams: list[str | None] = [None] + TEAMS
         for period in all_periods:
-            period_str = period  # "YYYY-MM"
-            # Build a date representing the last day of that period for aging ref
+            period_str = period
             year, month = int(period_str[:4]), int(period_str[5:7])
             if year == TODAY.year and month == TODAY.month:
                 ref_date = TODAY
@@ -407,8 +509,6 @@ def main():
             finalized = period < current_period
             for team in aging_teams:
                 team_key = team or "Todos"
-                # Historical aging: only items that existed AND were open at ref_date.
-                # Items created after ref_date or resolved before it are excluded.
                 ref_ts = pd.Timestamp(ref_date)
                 hist_df = df[df["created"] <= ref_ts].copy()
                 hist_df.loc[
@@ -450,19 +550,27 @@ def main():
     print("\n-- Sample metric_snapshots --")
     print(df_snap.to_string(index=False, max_rows=40))
 
-    open_count = len(df[~df["is_resolved"]])
-    old_count  = len(df[~df["is_resolved"] & (
+    open_df = df[~df["is_resolved"]]
+    subtask_count = len(df[df["issuetype"] == "Subtask"]) if "issuetype" in df.columns else 0
+    open_count = len(open_df)
+    old_count = len(df[~df["is_resolved"] & (
         (pd.Timestamp(TODAY) - df["created"]).dt.days > 30
     )])
-    print(f"\n-- Open items: {open_count} | older than 30d: {old_count}")
+    print(f"\n-- Total issues: {len(df)} | Subtasks: {subtask_count}")
+    print(f"-- Open items: {open_count} | older than 30d: {old_count}")
 
     from core_metrics import diagnose_status_concentration
-    open_df = df[~df["is_resolved"]]
     bottleneck = diagnose_status_concentration(open_df)
     print(f"-- Bottleneck status (all teams): {bottleneck or 'none detected'}")
 
-    status_dist = open_df["status"].value_counts().head(6)
+    status_dist = open_df["status"].value_counts().head(8)
     print(f"\n-- Open items by status:\n{status_dist.to_string()}")
+
+    if "parent_key" in df.columns:
+        stuck_cr = df[(df["issuetype"] == "Subtask") & (df["status"] == "Code Review") & (~df["is_resolved"])]
+        print(f"\n-- Scenario b: subtasks presas em Code Review: {len(stuck_cr)}")
+        scenario_c = open_df[open_df["status"].isin(["Revisão de Produto", "Pronto pra produção"])]
+        print(f"-- Scenario c: Histórias em Revisão/Pronto pra produção (open): {len(scenario_c)}")
 
 
 if __name__ == "__main__":

@@ -39,32 +39,54 @@ def _numeric_key(key: str) -> int:
 def assign_teams_round_robin(session: Session) -> int:
     """Assign teams cyclically when all issues_raw rows have team='Unknown'.
 
-    Sorts issues numerically by key (TD-1, TD-2, ...) and assigns
-    _ROUND_ROBIN_TEAMS in a cycle.  Updates both issues_raw and
-    issue_transitions so team filters work across both tables.
+    Regular issues (Histórias, GMUDs, Incidentes) are sorted numerically by key
+    and assigned in round-robin order.  Subtasks (issuetype == 'Subtask' or
+    parent_key is set) inherit their parent's team; if the parent hasn't been
+    assigned yet (e.g. orphan subtask), falls back to the next round-robin slot.
 
-    Returns the number of rows updated, or 0 if skipped (real team data present).
+    Updates both issues_raw and issue_transitions so team filters work across
+    both tables.  Returns 0 and skips if real team data is already present.
     """
-    rows = session.query(IssueRaw.key, IssueRaw.team).all()
+    rows = session.query(IssueRaw.key, IssueRaw.team, IssueRaw.issuetype, IssueRaw.parent_key).all()
     if not rows:
         return 0
 
-    # Skip if any row already has a real team value from Jira.
-    has_real_teams = any(
-        r.team and r.team != "Unknown"
-        for r in rows
-    )
+    has_real_teams = any(r.team and r.team != "Unknown" for r in rows)
     if has_real_teams:
         return 0
 
-    keys_sorted = sorted([r.key for r in rows], key=_numeric_key)
+    subtask_keys = {
+        r.key for r in rows
+        if r.issuetype == "Subtask" or (r.parent_key and r.parent_key.strip())
+    }
+    regular_rows = [r for r in rows if r.key not in subtask_keys]
+    subtask_rows = [r for r in rows if r.key in subtask_keys]
+
     n = len(_ROUND_ROBIN_TEAMS)
+    team_map: dict[str, str] = {}
+    rr_idx = 0
     updated = 0
-    for i, key in enumerate(keys_sorted):
-        team = _ROUND_ROBIN_TEAMS[i % n]
-        session.query(IssueRaw).filter_by(key=key).update({"team": team})
-        session.query(IssueTransition).filter_by(issue_key=key).update({"team": team})
+
+    # Step 1: round-robin for regular issues
+    for r in sorted(regular_rows, key=lambda r: _numeric_key(r.key)):
+        team = _ROUND_ROBIN_TEAMS[rr_idx % n]
+        rr_idx += 1
+        team_map[r.key] = team
+        session.query(IssueRaw).filter_by(key=r.key).update({"team": team})
+        session.query(IssueTransition).filter_by(issue_key=r.key).update({"team": team})
         updated += 1
+
+    # Step 2: subtasks inherit parent's team; fallback to round-robin for orphans
+    for r in sorted(subtask_rows, key=lambda r: _numeric_key(r.key)):
+        parent_team = team_map.get(r.parent_key) if r.parent_key else None
+        if parent_team is None:
+            parent_team = _ROUND_ROBIN_TEAMS[rr_idx % n]
+            rr_idx += 1
+        team_map[r.key] = parent_team
+        session.query(IssueRaw).filter_by(key=r.key).update({"team": parent_team})
+        session.query(IssueTransition).filter_by(issue_key=r.key).update({"team": parent_team})
+        updated += 1
+
     return updated
 
 
@@ -156,6 +178,7 @@ def sync_issues_raw(session: Session, df: pd.DataFrame) -> int:
             key=row["key"],
             issuetype=row.get("issuetype"),
             team=row.get("team"),
+            parent_key=row.get("parent_key"),
             status=row.get("status"),
             created=_to_py_datetime(row.get("created")),
             resolutiondate=_to_py_datetime(row.get("resolutiondate")),
@@ -180,16 +203,19 @@ def load_issues_from_db(session: Session) -> pd.DataFrame:
         "key": i.key,
         "issuetype": i.issuetype,
         "team": i.team or "Unknown",
+        "parent_key": i.parent_key,
         "status": i.status,
         "created": i.created,
         "resolutiondate": i.resolutiondate,
         "data_implantacao": i.data_implantacao,
+        "updated": i.updated,
     } for i in issues]
 
     df = pd.DataFrame(records)
     df["created"] = pd.to_datetime(df["created"], errors="coerce")
     df["resolutiondate"] = pd.to_datetime(df["resolutiondate"], errors="coerce")
     df["data_implantacao"] = pd.to_datetime(df["data_implantacao"], errors="coerce")
+    df["updated"] = pd.to_datetime(df["updated"], errors="coerce")
     df["year_month"] = df["created"].dt.to_period("M").astype(str)
     df["is_resolved"] = df["resolutiondate"].notna()
     return df

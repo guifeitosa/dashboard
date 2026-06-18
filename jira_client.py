@@ -146,6 +146,9 @@ def normalize_issue(issue: Dict, custom_fields: Dict[str, str]) -> Dict:
     if not resolutiondate and (status or "").lower() in TERMINAL_STATUSES:
         resolutiondate = updated
 
+    parent_obj = fields.get("parent")
+    parent_key = parent_obj.get("key") if isinstance(parent_obj, dict) else None
+
     team_value = None
     implant_value = None
     team_field = custom_fields.get("Team")
@@ -165,6 +168,7 @@ def normalize_issue(issue: Dict, custom_fields: Dict[str, str]) -> Dict:
         "key": key,
         "issuetype": issuetype,
         "team": team_value,
+        "parent_key": parent_key,
         "status": status,
         "created": created,
         "resolutiondate": resolutiondate,
@@ -261,7 +265,7 @@ def load_issues_and_transitions() -> Tuple[pd.DataFrame, List[Dict]]:
     """
     custom_fields = get_custom_field_ids(["Team", "Data de Implantação"])
     fields = (
-        ["issuetype", "status", "created", "resolutiondate", "updated"]
+        ["issuetype", "status", "created", "resolutiondate", "updated", "parent"]
         + list(custom_fields.values())
     )
 
@@ -274,7 +278,7 @@ def load_issues_and_transitions() -> Tuple[pd.DataFrame, List[Dict]]:
         normalized.append(normalize_issue(issue, custom_fields))
 
     df = pd.DataFrame(normalized) if normalized else pd.DataFrame(columns=[
-        "key", "issuetype", "team", "status", "created",
+        "key", "issuetype", "team", "parent_key", "status", "created",
         "resolutiondate", "data_implantacao", "updated",
     ])
     df["created"] = pd.to_datetime(df["created"], errors="coerce", utc=True).dt.tz_convert(None)

@@ -1,6 +1,6 @@
 import os
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Index, Integer, String, UniqueConstraint, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Float, Index, Integer, String, UniqueConstraint, create_engine, text
 from sqlalchemy.orm import declarative_base
 
 _db_path = os.environ.get("DASHBOARD_DB_PATH", "metrics.db")
@@ -14,6 +14,7 @@ class IssueRaw(Base):
     key = Column(String, primary_key=True)
     issuetype = Column(String)
     team = Column(String)
+    parent_key = Column(String, nullable=True)
     status = Column(String)
     created = Column(DateTime)
     resolutiondate = Column(DateTime)
@@ -57,5 +58,16 @@ class IssueTransition(Base):
     )
 
 
+def _ensure_parent_key_column() -> None:
+    """Add parent_key to issues_raw if the DB was created before this column existed."""
+    with engine.connect() as conn:
+        result = conn.execute(text("PRAGMA table_info(issues_raw)"))
+        cols = [row[1] for row in result]
+        if "parent_key" not in cols:
+            conn.execute(text("ALTER TABLE issues_raw ADD COLUMN parent_key TEXT"))
+            conn.commit()
+
+
 def init_db():
     Base.metadata.create_all(engine)
+    _ensure_parent_key_column()

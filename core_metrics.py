@@ -1336,6 +1336,122 @@ def build_aging_diagnostics(
             )
             events.extend([ins, rec])
 
+    # ── Subtask-aware rules (A, B, C) ────────────────────────────────────────
+    # Rules A and B require parent_key — silently skipped when the column is absent
+    # (Kanban teams that don't use subtasks).  Rule C only needs updated.
+    _df_team = df if team is None else df[df["team"] == team]
+    _today_ts = pd.Timestamp(today or datetime.date.today())
+
+    # Rule A: open Histórias whose subtasks all reached a terminal status.
+    if "parent_key" in df.columns:
+        _open_historias = _df_team[
+            (_df_team["issuetype"] == "História") & (~_df_team["is_resolved"])
+        ]
+        _subtasks = _df_team[_df_team["issuetype"] == "Subtask"]
+
+        if not _subtasks.empty and not _open_historias.empty:
+            _blocked_a: list[str] = []
+            for _, _h in _open_historias.iterrows():
+                _subs = _subtasks[_subtasks["parent_key"] == _h["key"]]
+                if not _subs.empty and bool(_subs["is_resolved"].all()):
+                    _blocked_a.append(_h["key"])
+
+            if _blocked_a:
+                _cnt_a = len(_blocked_a)
+                _hist_word = "história" if _cnt_a == 1 else "histórias"
+                _verb = "teve" if _cnt_a == 1 else "tiveram"
+                ins = _mk(
+                    "aging", "high", "insight",
+                    "Histórias prontas esperando avançar",
+                    f"{_cnt_a} {_hist_word} já {_verb} todo o trabalho técnico concluído, "
+                    "mas ainda não avançaram de status. Pode ser falta de atualização "
+                    "manual ou um passo no processo que ficou pra trás.",
+                    {"count": _cnt_a, "issue_keys": _blocked_a[:5]},
+                )
+                rec = _mk(
+                    "aging", "info", "recommendation",
+                    "Atualizar status das histórias prontas",
+                    "Vale revisar essas histórias e atualizar o status — elas podem "
+                    "estar mais próximas da entrega do que parecem.",
+                    {},
+                    related=[ins.id],
+                )
+                events.extend([ins, rec])
+
+    # Rule B: subtasks in "Code Review" status for more than 5 days (updated as proxy).
+    if "parent_key" in df.columns and "updated" in df.columns:
+        _open_cr = _df_team[
+            (_df_team["issuetype"] == "Subtask")
+            & (~_df_team["is_resolved"])
+            & (_df_team["status"] == "Code Review")
+        ].copy()
+
+        if not _open_cr.empty:
+            _open_cr["_days_waiting"] = (
+                (_today_ts - _open_cr["updated"]).dt.days.clip(lower=0)
+            )
+            _stuck_b = _open_cr[_open_cr["_days_waiting"] > 5]
+
+            if not _stuck_b.empty:
+                _cnt_b = len(_stuck_b)
+                _avg_b = round(float(_stuck_b["_days_waiting"].mean()), 1)
+                _item_word = "item está" if _cnt_b == 1 else "itens estão"
+                ins = _mk(
+                    "aging", "high", "insight",
+                    "Itens aguardando revisão de código há dias",
+                    f"{_cnt_b} {_item_word} esperando revisão de código há mais de 5 dias. "
+                    "Isso pode indicar falta de revisor disponível ou revisões que estão "
+                    "sendo adiadas.",
+                    {"count": _cnt_b, "avg_days_waiting": _avg_b},
+                )
+                rec = _mk(
+                    "aging", "info", "recommendation",
+                    "Distribuir revisões entre o time",
+                    "Vale verificar se há alguém disponível pra revisar — ou se as "
+                    "revisões podem ser distribuídas melhor entre o time.",
+                    {},
+                    related=[ins.id],
+                )
+                events.extend([ins, rec])
+
+    # Rule C: open Histórias in late-stage statuses for more than 3 days.
+    _NEAR_DONE = frozenset({"Revisão de Produto", "Pronto pra produção"})
+    if "updated" in df.columns:
+        _near_done = _df_team[
+            (~_df_team["is_resolved"])
+            & (_df_team["issuetype"] == "História")
+            & (_df_team["status"].isin(_NEAR_DONE))
+        ].copy()
+
+        if not _near_done.empty:
+            _near_done["_days_stuck"] = (
+                (_today_ts - _near_done["updated"]).dt.days.clip(lower=0)
+            )
+            _stuck_c = _near_done[_near_done["_days_stuck"] > 3]
+
+            if not _stuck_c.empty:
+                _cnt_c = len(_stuck_c)
+                _keys_c = _stuck_c.head(5)["key"].tolist()
+                _hist_word = "história chegou" if _cnt_c == 1 else "histórias chegaram"
+                _parada = "está parada" if _cnt_c == 1 else "estão paradas"
+                ins = _mk(
+                    "aging", "critical", "insight",
+                    "Entregas quase prontas paradas na reta final",
+                    f"{_cnt_c} {_hist_word} longe no fluxo mas {_parada} há mais de 3 dias. "
+                    "São as mais próximas de gerar valor — qualquer esforço aqui tem "
+                    "alto retorno.",
+                    {"count": _cnt_c, "issue_keys": _keys_c},
+                )
+                rec = _mk(
+                    "aging", "high", "recommendation",
+                    "Priorizar essas histórias na conversa com o time",
+                    "Priorize essas histórias na próxima conversa com o time — são "
+                    "as que mais perto estão de chegar ao usuário.",
+                    {},
+                    related=[ins.id],
+                )
+                events.extend([ins, rec])
+
     return events
 
 

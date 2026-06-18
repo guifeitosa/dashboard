@@ -514,3 +514,255 @@ class TestNoRuleFires:
         rec  = [e for e in events if e.layer == "recommendation"]
 
         assert len(diag) == len(rec)
+
+
+# ── Helpers for subtask-aware rules (A, B, C) ─────────────────────────────────
+
+def _open_k(
+    key: str,
+    status: str,
+    created_days_ago: int,
+    updated_days_ago: int = 5,
+    team: str = "Time Alfa",
+    issuetype: str = "História",
+    parent_key: str | None = None,
+) -> dict:
+    """Like _open but with an explicit key and optional parent_key."""
+    return {
+        "key": key,
+        "issuetype": issuetype,
+        "team": team,
+        "parent_key": parent_key,
+        "status": status,
+        "created": _TS(created_days_ago),
+        "resolutiondate": None,
+        "updated": _TS(updated_days_ago),
+        "data_implantacao": None,
+    }
+
+
+def _done_k(
+    key: str,
+    created_days_ago: int = 10,
+    resolved_days_ago: int = 2,
+    team: str = "Time Alfa",
+    parent_key: str | None = None,
+) -> dict:
+    """Resolved subtask with explicit key."""
+    return {
+        "key": key,
+        "issuetype": "Subtask",
+        "team": team,
+        "parent_key": parent_key,
+        "status": "Concluído",
+        "created": _TS(created_days_ago),
+        "resolutiondate": _TS(resolved_days_ago),
+        "updated": _TS(resolved_days_ago),
+        "data_implantacao": None,
+    }
+
+
+def _raw_df(rows: list[dict]) -> pd.DataFrame:
+    """DataFrame from rows that already have explicit keys (no auto-assignment)."""
+    df = pd.DataFrame(rows)
+    for col in ("created", "resolutiondate", "updated", "data_implantacao"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+
+# ── Rule A: História pronta tecnicamente mas parada ───────────────────────────
+
+class TestRuleAHistoriaProntaMasParada:
+    def test_fires_when_all_subtasks_done(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", created_days_ago=20),
+            _done_k("S-001", parent_key="H-001"),
+            _done_k("S-002", parent_key="H-001"),
+        ])
+        events = build_aging_diagnostics(df, team=None, issuetype=None, today=_TODAY)
+        ins = [e for e in events if e.title == "Histórias prontas esperando avançar"]
+        assert len(ins) == 1
+        assert ins[0].evidence["count"] == 1
+        assert "H-001" in ins[0].evidence["issue_keys"]
+
+    def test_silent_when_one_subtask_still_open(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", created_days_ago=20),
+            _done_k("S-001", parent_key="H-001"),
+            _open_k("S-002", "Code Review", created_days_ago=15, updated_days_ago=3,
+                    issuetype="Subtask", parent_key="H-001"),
+        ])
+        events = build_aging_diagnostics(df, team=None, issuetype=None, today=_TODAY)
+        ins = [e for e in events if e.title == "Histórias prontas esperando avançar"]
+        assert len(ins) == 0
+
+    def test_silent_when_no_subtasks_exist(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", created_days_ago=20),
+            _open_k("H-002", "Em testes", created_days_ago=15),
+        ])
+        events = build_aging_diagnostics(df, team=None, issuetype=None, today=_TODAY)
+        ins = [e for e in events if e.title == "Histórias prontas esperando avançar"]
+        assert len(ins) == 0
+
+    def test_team_filter_applies(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", 20, team="Time Alfa"),
+            _done_k("S-001", parent_key="H-001", team="Time Alfa"),
+            _open_k("H-002", "Em desenvolvimento", 20, team="Time Beta"),
+            _done_k("S-002", parent_key="H-002", team="Time Beta"),
+        ])
+        events = build_aging_diagnostics(df, team="Time Alfa", issuetype=None, today=_TODAY)
+        ins = [e for e in events if e.title == "Histórias prontas esperando avançar"]
+        assert len(ins) == 1
+        assert ins[0].evidence["count"] == 1
+
+    def test_diag_rec_parallel(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", 20),
+            _done_k("S-001", parent_key="H-001"),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        diag = [e for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e for e in events if e.layer == "recommendation"]
+        assert len(diag) == len(rec)
+
+
+# ── Rule B: Subtask parada em Code Review ────────────────────────────────────
+
+class TestRuleBSubtaskCodeReview:
+    def test_fires_when_stuck_over_5_days(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", created_days_ago=20),
+            _open_k("S-001", "Code Review", created_days_ago=15, updated_days_ago=7,
+                    issuetype="Subtask", parent_key="H-001"),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Itens aguardando revisão de código há dias"]
+        assert len(ins) == 1
+        assert ins[0].evidence["count"] == 1
+        assert ins[0].evidence["avg_days_waiting"] == 7.0
+
+    def test_silent_when_5_days_or_less(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", 20),
+            _open_k("S-001", "Code Review", 10, updated_days_ago=4,
+                    issuetype="Subtask", parent_key="H-001"),
+            _open_k("S-002", "Code Review", 10, updated_days_ago=5,
+                    issuetype="Subtask", parent_key="H-001"),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Itens aguardando revisão de código há dias"]
+        assert len(ins) == 0
+
+    def test_silent_when_no_subtasks(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", 20, updated_days_ago=10),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Itens aguardando revisão de código há dias"]
+        assert len(ins) == 0
+
+    def test_silent_when_subtask_resolved(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", 20),
+            _done_k("S-001", parent_key="H-001"),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Itens aguardando revisão de código há dias"]
+        assert len(ins) == 0
+
+    def test_avg_days_computed_correctly(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", 20),
+            _open_k("S-001", "Code Review", 15, updated_days_ago=7,
+                    issuetype="Subtask", parent_key="H-001"),
+            _open_k("S-002", "Code Review", 15, updated_days_ago=9,
+                    issuetype="Subtask", parent_key="H-001"),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Itens aguardando revisão de código há dias"]
+        assert ins[0].evidence["avg_days_waiting"] == 8.0
+
+
+# ── Rule C: História parada perto da entrega ─────────────────────────────────
+
+class TestRuleCNearDoneBlocked:
+    def test_fires_for_revisao_produto_over_3_days(self):
+        df = _raw_df([
+            _open_k("H-001", "Revisão de Produto", 20, updated_days_ago=5),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Entregas quase prontas paradas na reta final"]
+        assert len(ins) == 1
+        assert ins[0].severity == "critical"
+        assert ins[0].evidence["count"] == 1
+
+    def test_fires_for_pronto_pra_producao_over_3_days(self):
+        df = _raw_df([
+            _open_k("H-001", "Pronto pra produção", 20, updated_days_ago=4),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Entregas quase prontas paradas na reta final"]
+        assert len(ins) == 1
+
+    def test_silent_when_3_days_or_less(self):
+        df = _raw_df([
+            _open_k("H-001", "Revisão de Produto", 20, updated_days_ago=2),
+            _open_k("H-002", "Pronto pra produção", 20, updated_days_ago=3),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Entregas quase prontas paradas na reta final"]
+        assert len(ins) == 0
+
+    def test_silent_for_other_statuses(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", 20, updated_days_ago=10),
+            _open_k("H-002", "Em testes", 20, updated_days_ago=10),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Entregas quase prontas paradas na reta final"]
+        assert len(ins) == 0
+
+    def test_issue_keys_in_evidence(self):
+        df = _raw_df([
+            _open_k("H-001", "Revisão de Produto", 20, updated_days_ago=5),
+            _open_k("H-002", "Pronto pra produção", 20, updated_days_ago=6),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Entregas quase prontas paradas na reta final"]
+        assert ins[0].evidence["count"] == 2
+        assert "H-001" in ins[0].evidence["issue_keys"]
+        assert "H-002" in ins[0].evidence["issue_keys"]
+
+    def test_recommendation_is_high_severity(self):
+        df = _raw_df([
+            _open_k("H-001", "Revisão de Produto", 20, updated_days_ago=5),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        rec = [e for e in events if e.layer == "recommendation" and "próxima conversa" in e.description]
+        assert len(rec) == 1
+        assert rec[0].severity == "high"
+
+    def test_all_three_new_rules_fire_simultaneously(self):
+        """All rules A, B, C fire at once — invariant len(diag)==len(rec) holds."""
+        df = _raw_df([
+            # Rule A: open História with all subtasks done
+            _open_k("H-001", "Em desenvolvimento", 20),
+            _done_k("S-001", parent_key="H-001"),
+            # Rule B: subtask stuck in Code Review > 5 days
+            _open_k("H-002", "Em desenvolvimento", 20),
+            _open_k("S-002", "Code Review", 15, updated_days_ago=7,
+                    issuetype="Subtask", parent_key="H-002"),
+            # Rule C: História near done > 3 days
+            _open_k("H-003", "Revisão de Produto", 20, updated_days_ago=5),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        diag = [e for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e for e in events if e.layer == "recommendation"]
+        assert len(diag) == len(rec)
+        titles = {e.title for e in diag}
+        assert "Histórias prontas esperando avançar" in titles
+        assert "Itens aguardando revisão de código há dias" in titles
+        assert "Entregas quase prontas paradas na reta final" in titles
