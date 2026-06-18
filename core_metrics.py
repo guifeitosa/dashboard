@@ -939,3 +939,100 @@ def squad_health_score(
         "current_month_dora": current_month_dora,
         "cfr_excluded":       cfr_excluded,
     }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Throughput diagnostic rules
+# ────────────────────────────────────────────────────────────────────────────
+
+def build_throughput_diagnostics(
+    closed_list: list[dict],
+    df: pd.DataFrame,
+    team: Optional[str],
+    pred: dict,
+    *,
+    today: Optional[datetime.date] = None,
+) -> tuple[list[str], list[str]]:
+    """Interpret throughput data and return (diag_items, rec_items) for display.
+
+    Three rules, evaluated independently — each fires at most once:
+      Rule 1 (Aging × TP):    compares last two closed months and current aging state.
+      Rule 2 (Gargalo):       non-terminal status with > 2× mean volume of open items.
+      Rule 3 (Predictability): fires when pred["label"] == "Baixa".
+
+    Parameters
+    ----------
+    closed_list : list[dict]  — tp["closed"] from compute_throughput(); each dict
+                                 has {"month": "YYYY-MM", "count": int, "label": str}
+    df          : DataFrame   — issues_raw (raw or already prepared; idempotent)
+    team        : str|None    — active team filter; None = all teams
+    pred        : dict        — from compute_predictability(); requires key "label"
+    today       : date|None   — reference date for aging (defaults to date.today())
+
+    Returns
+    -------
+    (diag_items, rec_items) — parallel lists of strings, one entry per fired rule.
+    An empty pair means no rule fired.
+    """
+    df = prepare_df(df)
+    diag: list[str] = []
+    rec:  list[str] = []
+
+    # Rule 1: TP direction vs. previous closed month + current aging state.
+    # "Aging OK"  = <20% of open items older than 30 days.
+    # "Aging bad" = >30% of open items older than 30 days.
+    if len(closed_list) >= 2:
+        tp_cur  = closed_list[-1]["count"]
+        tp_prev = closed_list[-2]["count"]
+        aging = compute_aging(df, team=team, today=today)
+        pct_crit = (
+            (aging["bands"]["30–60d"] + aging["bands"]["60+d"]) / aging["total_open"]
+            if aging["total_open"] > 0 else 0.0
+        )
+        if tp_cur > tp_prev and pct_crit < 0.20:
+            diag.append(
+                "Os itens abertos estão sendo resolvidos mais rápido, "
+                "o que ajudou a aumentar as entregas neste período."
+            )
+            rec.append(
+                "Continue revisando os itens parados com regularidade — está funcionando."
+            )
+        elif tp_cur < tp_prev and pct_crit > 0.30:
+            diag.append(
+                "Itens estão demorando mais para avançar, "
+                "o que pode estar reduzindo as entregas."
+            )
+            rec.append(
+                "Vale dar atenção aos itens mais antigos antes que isso afete ainda mais as entregas."
+            )
+
+    # Rule 2: bottleneck — non-terminal status with > 2× the mean count of open items.
+    open_now = df if team is None else df[df["team"] == team]
+    open_now = open_now[~open_now["is_resolved"]]
+    if not open_now.empty:
+        sc = open_now.groupby("status").size()
+        active_st = [s for s in sc.index if s.strip().lower() not in TERMINAL_STATUSES]
+        if len(active_st) >= 2:
+            bk = max(active_st, key=lambda s: sc.get(s, 0))
+            mean_sc = sum(sc.get(s, 0) for s in active_st) / len(active_st)
+            if mean_sc > 0 and sc.get(bk, 0) / mean_sc > 2.0:
+                diag.append(
+                    f"Muitos itens estão ficando parados em **{bk}**, "
+                    "o que pode estar represando as entregas."
+                )
+                rec.append(
+                    f"Vale entender o que está travando os itens parados em **{bk}**."
+                )
+
+    # Rule 3: low predictability.
+    if pred.get("label") == "Baixa":
+        diag.append(
+            "O volume de entregas tem variado bastante de mês a mês, "
+            "dificultando prever o ritmo futuro."
+        )
+        rec.append(
+            "Antes de assumir compromissos de prazo, "
+            "vale entender por que o volume está tão instável."
+        )
+
+    return diag, rec
