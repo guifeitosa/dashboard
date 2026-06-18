@@ -4,5 +4,6 @@ __pycache__/
 .venv/
 .vscode/
 *.db
+!metrics_demo.db
 *.txt
 .pytest_cache/

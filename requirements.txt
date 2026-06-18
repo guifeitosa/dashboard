@@ -5,4 +5,3 @@ altair>=5.0
 requests>=2.0
 python-dotenv>=1.0
 sqlalchemy>=2.0
-pytest>=7.0
