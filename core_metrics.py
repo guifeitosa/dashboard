@@ -1199,3 +1199,108 @@ def build_aging_diagnostics(
             )
 
     return diag, rec
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# DORA diagnostic rules
+# ────────────────────────────────────────────────────────────────────────────
+
+_DORA_METRIC_LABELS: dict[str, str] = {
+    "lead_time_days":       "Lead Time",
+    "deploy_freq_interval": "Deployment Frequency",
+    "mttr_hours":           "MTTR",
+    "cfr_percent":          "CFR",
+}
+
+_DORA_RECS_WORSENED: dict[str, str] = {
+    "lead_time_days":       (
+        "Vale investigar o que está travando o fluxo de entrega, "
+        "como aprovações lentas ou retrabalho."
+    ),
+    "deploy_freq_interval": (
+        "Vale entender se os deploys ficaram menos frequentes "
+        "por falta de prioridade ou por mais cautela."
+    ),
+    "mttr_hours":           (
+        "Vale revisar o processo de resposta a incidentes — pode estar "
+        "demorando mais pra detectar ou corrigir problemas."
+    ),
+    "cfr_percent":          (
+        "Vale revisar as últimas mudanças que falharam "
+        "pra entender se há um padrão."
+    ),
+}
+
+
+def build_dora_diagnostics(
+    current: dict,
+    prev: Optional[dict],
+) -> tuple[list[str], list[str]]:
+    """Interpret DORA metric band changes and return (diag_items, rec_items).
+
+    Three rules, evaluated independently:
+      Rule 1 (Faixa em deterioração): any metric's DORA band worsened vs. prev.
+      Rule 2 (Faixa em melhoria):     any metric's DORA band improved vs. prev.
+      Rule 3 (CFR × Deploy Freq):     CFR raw value went up AND deploy_freq_interval
+                                       went up (fewer deploys) in the same period.
+
+    Parameters
+    ----------
+    current : dict with keys lead_time_days, deploy_freq_interval, mttr_hours,
+              cfr_percent. None values mean no data for that metric — the rule
+              for that metric is silently skipped.
+    prev    : same shape for the previous closed month, or None to skip all rules.
+
+    Returns
+    -------
+    (diag_items, rec_items) — parallel lists, one entry per fired rule.
+    """
+    diag: list[str] = []
+    rec:  list[str] = []
+
+    if prev is None:
+        return diag, rec
+
+    # Rules 1 & 2: one entry per metric whose band changed.
+    for key in ("lead_time_days", "deploy_freq_interval", "mttr_hours", "cfr_percent"):
+        cur_v = current.get(key)
+        prv_v = prev.get(key)
+        if cur_v is None or prv_v is None:
+            continue
+        cur_band = dora_band(key, cur_v)
+        prv_band = dora_band(key, prv_v)
+        if cur_band == "N/A" or prv_band == "N/A":
+            continue
+        cur_rank = _LEVEL_RANK[cur_band]
+        prv_rank = _LEVEL_RANK[prv_band]
+        label = _DORA_METRIC_LABELS[key]
+        if cur_rank > prv_rank:
+            diag.append(
+                f"{label} piorou de faixa: estava {prv_band} e agora está {cur_band}."
+            )
+            rec.append(_DORA_RECS_WORSENED[key])
+        elif cur_rank < prv_rank:
+            diag.append(
+                f"{label} melhorou de faixa: estava {prv_band} e agora está {cur_band}."
+            )
+            rec.append("Vale entender o que mudou e tentar manter essa prática.")
+
+    # Rule 3: CFR up AND deploy interval up (fewer deploys) simultaneously.
+    # Uses raw values — fires even when neither metric crossed a band boundary.
+    cur_cfr  = current.get("cfr_percent")
+    prv_cfr  = prev.get("cfr_percent")
+    cur_freq = current.get("deploy_freq_interval")
+    prv_freq = prev.get("deploy_freq_interval")
+    if (cur_cfr is not None and prv_cfr is not None
+            and cur_freq is not None and prv_freq is not None
+            and cur_cfr > prv_cfr and cur_freq > prv_freq):
+        diag.append(
+            "A frequência de deploy caiu no mesmo período em que a taxa de falhas subiu "
+            "— pode ser que o time esteja mais cauteloso depois das falhas."
+        )
+        rec.append(
+            "Vale conversar com o time pra entender se a cautela está ajudando "
+            "ou só atrasando entregas sem reduzir risco."
+        )
+
+    return diag, rec

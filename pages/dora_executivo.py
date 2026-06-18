@@ -3,7 +3,7 @@ import calendar
 import pandas as pd
 import streamlit as st
 
-from core_metrics import dora_band, prepare_df
+from core_metrics import build_dora_diagnostics, dora_band, prepare_df
 from db import engine
 from metrics import aggregate_metrics_by_month, calculate_metrics_summary
 from squad_health import render_squad_health
@@ -379,6 +379,43 @@ def main():
 """,
             unsafe_allow_html=True,
         )
+
+    # ── Diagnóstico & Recomendação ─────────────────────────────────────────────
+    _DORA_KEYS = ["lead_time_days", "deploy_freq_interval", "mttr_hours", "cfr_percent"]
+
+    def _sf(v) -> float | None:
+        return None if _miss(v) else float(v)
+
+    _cur_dict  = {k: _sf((current_row or {}).get(k)) for k in _DORA_KEYS}
+    _prev_row  = _row(hist_months[-1])   # _row returns None when hist_months[-1] == "-"
+    _prev_dict = ({k: _sf(_prev_row.get(k)) for k in _DORA_KEYS}
+                  if _prev_row is not None else None)
+
+    _dora_diag, _dora_rec = build_dora_diagnostics(_cur_dict, _prev_dict)
+
+    st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:11px;font-weight:700;color:#94a3b8;'
+        'text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px;">'
+        'Diagnóstico &amp; Recomendação</div>',
+        unsafe_allow_html=True,
+    )
+    if not _dora_diag:
+        st.markdown(
+            '<span style="font-size:13px;color:#94a3b8;">'
+            'Nenhum fator de destaque identificado neste período.</span>',
+            unsafe_allow_html=True,
+        )
+    else:
+        col_d, col_r = st.columns(2, gap="large")
+        with col_d:
+            st.markdown("**🔍 Diagnóstico**")
+            for _d in _dora_diag:
+                st.markdown(f"- {_d}")
+        with col_r:
+            st.markdown("**🎯 Recomendação**")
+            for _r in _dora_rec:
+                st.markdown(f"- {_r}")
 
     # ── FAIXAS DORA footer (uses st.html to avoid markdown parser interference) ──
     def dot(c):

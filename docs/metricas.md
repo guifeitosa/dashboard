@@ -10,10 +10,11 @@
 6. [Scoring — funções de pontuação](#6-scoring)
 7. [Squad Health Score](#7-squad-health-score)
 8. [Página Fluxo — diagnóstico de gargalo](#8-página-fluxo)
-9. [Pipeline de snapshot](#9-pipeline-de-snapshot)
-10. [Status de migração por página](#10-status-de-migração-por-página)
-11. [Limitações conhecidas do ambiente de teste](#11-limitações-conhecidas-do-ambiente-de-teste)
-12. [Glossário](#12-glossário)
+9. [Diagnósticos automáticos](#9-diagnósticos-automáticos)
+10. [Pipeline de snapshot](#10-pipeline-de-snapshot)
+11. [Status de migração por página](#11-status-de-migração-por-página)
+12. [Limitações conhecidas do ambiente de teste](#12-limitações-conhecidas-do-ambiente-de-teste)
+13. [Glossário](#13-glossário)
 
 ---
 
@@ -417,7 +418,61 @@ Usar a média geral (incluindo o próprio gargalo) como referência evita inflar
 
 ---
 
-## 9. Pipeline de snapshot
+## 9. Diagnósticos automáticos
+
+Todas as páginas de métricas exibem uma seção **"Diagnóstico & Recomendação"** gerada por funções puras em `core_metrics.py` — sem Streamlit, testáveis com dados forjados. O padrão é idêntico em todos os módulos: retornam `(diag_items, rec_items)` — listas paralelas de strings, um item por regra disparada.
+
+### 9.1 `build_throughput_diagnostics(closed_list, df, team, pred)`
+
+Três regras independentes:
+
+| Regra | Condição | Exemplo de diagnóstico |
+|---|---|---|
+| **1 — Aging × TP** | TP subiu E pct_crit < 20% → positivo; TP caiu E pct_crit > 30% → negativo | "Os itens abertos estão sendo resolvidos mais rápido…" |
+| **2 — Gargalo** | Status não-terminal com mais de 2× a média de itens abertos | "Muitos itens estão ficando parados em **Em Revisão**, o que pode estar represando…" |
+| **3 — Previsibilidade** | `pred["label"] == "Baixa"` (CV > 30%) | "O volume de entregas tem variado bastante…" |
+
+### 9.2 `build_aging_diagnostics(df, team, issuetype, today, prev_aging)`
+
+Três regras independentes:
+
+| Regra | Condição | Notas |
+|---|---|---|
+| **1 — Gargalo** | Status não-terminal com > 2× média | Reutiliza `diagnose_status_concentration` |
+| **2 — Tendência** | `avg_age` ou `pct_critical` mudaram ≥ limiar vs. `prev_aging` | **Worsened + gargalo ativo:** incorpora nome do status na frase. **Improved + pct_crit > 50%:** qualifica com "ainda é crítica" |
+| **3 — Sem movimentação** | > 20% dos itens abertos sem `updated` nos últimos 14 dias | Silencioso quando coluna `updated` ausente |
+
+**`prev_aging`:** lido de `metric_snapshots` (`aging_avg_age`, `aging_pct_critical`, `aging_total_open`) para o período anterior. Gravado no sync via `compute_aging`. Fallback: `compute_aging(df, today=today-30d)` quando não há snapshot.
+
+**Guard:** quando `prev_aging["avg_age"] < 0` (artefato de migração — itens criados após a data de referência), a Regra 2 é silenciada.
+
+Constantes de limiar:
+
+| Constante | Valor | Uso |
+|---|---|---|
+| `_AGING_TREND_AGE_DELTA` | `1.0d` | Variação mínima de `avg_age` para disparar Regra 2 |
+| `_AGING_TREND_CRIT_DELTA` | `0.02` | Variação mínima de `pct_critical` para disparar Regra 2 |
+| `_AGING_STILL_CRITICAL_THRESHOLD` | `0.50` | Acima desse valor, a mensagem de melhoria é qualificada |
+
+### 9.3 `build_dora_diagnostics(current, prev)`
+
+Compara dois dicts com as chaves `lead_time_days`, `deploy_freq_interval`, `mttr_hours`, `cfr_percent`. Três regras independentes:
+
+| Regra | Condição | Notas |
+|---|---|---|
+| **1 — Faixa em deterioração** | Faixa DORA piorou vs. `prev` (por métrica) | Recomendação específica por métrica |
+| **2 — Faixa em melhoria** | Faixa DORA melhorou vs. `prev` (por métrica) | Recomendação genérica "manter essa prática" |
+| **3 — CFR × Deploy Freq** | `cfr_percent` subiu E `deploy_freq_interval` subiu (menos deploys) em valores brutos | Dispara independente de mudança de faixa; aborda a hipótese de cautela pós-falha |
+
+**Política de N/A:** se `current[key]` ou `prev[key]` for `None`, as Regras 1/2 para aquela métrica são silenciadas. Se `cfr_percent` ou `deploy_freq_interval` for `None`, a Regra 3 é silenciada.
+
+### 9.4 `diagnose_status_concentration(open_df, ratio_threshold=2.0)`
+
+Auxiliar compartilhado por Throughput e Aging. Retorna o nome do status não-terminal que concentra mais de `ratio_threshold × média` dos itens abertos, ou `None`.
+
+---
+
+## 10. Pipeline de snapshot
 
 ### `sync_and_snapshot.py`
 
@@ -444,7 +499,7 @@ Alterar `DATABASE_URL` em `db.py`. O restante do código não precisa mudar (SQL
 
 ---
 
-## 10. Status de migração por página
+## 11. Status de migração por página
 
 | Página | Fonte de dados | Status |
 |---|---|---|
@@ -457,7 +512,7 @@ Alterar `DATABASE_URL` em `db.py`. O restante do código não precisa mudar (SQL
 
 ---
 
-## 11. Limitações conhecidas do ambiente de teste
+## 12. Limitações conhecidas do ambiente de teste
 
 | Área | Limitação | Causa | Workaround |
 |---|---|---|---|
@@ -469,7 +524,7 @@ Alterar `DATABASE_URL` em `db.py`. O restante do código não precisa mudar (SQL
 
 ---
 
-## 12. Glossário
+## 13. Glossário
 
 | Termo | Definição |
 |---|---|
