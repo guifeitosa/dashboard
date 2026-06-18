@@ -2,10 +2,13 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 
-from loader import load_jira_issues_from_csv
+from core_metrics import (
+    compute_throughput,
+    diagnose_throughput_drop,
+    prepare_df,
+)
+from db import engine
 from squad_health import render_squad_health
-
-DATA_PATH = "data/jira_issues_synthetic.csv"
 
 MONTH_PT = {
     "01": "JAN", "02": "FEV", "03": "MAR", "04": "ABR",
@@ -23,8 +26,6 @@ TYPE_COLORS = {
 }
 TYPE_COLOR_DEFAULT = "#94a3b8"
 
-# Diagnóstico da queda (heurístico) — limiar de "queda relevante" no mês mais
-# recente vs. a média, e cores das causas candidatas.
 DROP_THRESHOLD_PCT = 10.0
 CAUSE_COLORS = {
     "Aging": "#dc2626",
@@ -32,6 +33,12 @@ CAUSE_COLORS = {
     "Incidentes": "#f97316",
     "Variação normal": "#94a3b8",
 }
+
+
+@st.cache_data(ttl=300)
+def _load_issues() -> pd.DataFrame:
+    df = pd.read_sql("SELECT * FROM issues_raw", engine)
+    return prepare_df(df)
 
 
 def fmt_month(ym: str) -> str:
@@ -72,143 +79,6 @@ def _card(label: str, value_html: str, sub: str = "",
     )
 
 
-def _compute_trend(counts: list, avg_val: float) -> tuple:
-    """
-    Crescimento: últimos 3 meses todos acima da média
-    Queda: últimos 2 meses ambos abaixo da média
-    Estável: demais casos
-    """
-    if len(counts) >= 3 and all(c > avg_val for c in counts[-3:]):
-        return "Crescimento", "↗", "#15803d", "Últimos 3 meses acima da média"
-    if len(counts) >= 2 and all(c < avg_val for c in counts[-2:]):
-        return "Queda", "↘", "#dc2626", "Últimos 2 meses abaixo da média"
-    return "Estável", "→", "#94a3b8", "Sem tendência definida"
-
-
-def _compute_health(trend_label: str, last_count: float,
-                    avg_val: float, cv: float) -> tuple:
-    """
-    Crítica: último mês < 50% da média  OU  (Queda E último < 70% da média)
-    Boa:     (Crescimento ou Estável)  E  cv < 0.40
-    Atenção: demais casos (queda moderada ou alta variabilidade)
-    cv = desvio_padrão / média  (coeficiente de variação)
-    """
-    ratio = (last_count / avg_val) if avg_val > 0 else 1.0
-    if ratio < 0.50 or (trend_label == "Queda" and ratio < 0.70):
-        return "Crítica", "🔴", "#dc2626", "Último mês muito abaixo da média"
-    if trend_label in ("Crescimento", "Estável") and cv < 0.40:
-        return "Boa", "🟢", "#15803d", "Volume estável ou crescente"
-    return "Atenção", "🟡", "#ca8a04", "Queda moderada ou alta variabilidade"
-
-
-def _compute_predictability(cv: float) -> tuple:
-    """
-    Previsibilidade pelo coeficiente de variação (cv = desvio padrão / média)
-    do throughput mensal no período selecionado:
-      🟢 Alta  : desvio < 15%
-      🟡 Média : 15% – 30%
-      🔴 Baixa : > 30%
-    """
-    pct = cv * 100
-    if pct < 15:
-        return "Alta", "🟢", "#15803d"
-    if pct <= 30:
-        return "Média", "🟡", "#ca8a04"
-    return "Baixa", "🔴", "#dc2626"
-
-
-def _diagnose_drop(period_months: list, tp_by_month: dict,
-                   team_df: pd.DataFrame) -> list:
-    """
-    Diagnóstico HEURÍSTICO de uma queda de throughput.
-
-    Isto é uma CORRELAÇÃO HEURÍSTICA SIMPLES, não uma prova causal real — uma
-    primeira aproximação útil, não uma análise estatística rigorosa. Todos os
-    valores abaixo vêm dos dados reais do período (nenhum percentual é fixo).
-
-    Fórmula:
-      1. Para cada candidato f (Aging, Bugs, Incidentes), o desvio % dele mesmo
-         vs. a própria média do período:
-             desvio_f = (f_atual - f_média) / f_média
-         Clipado em 0 quando vai na direção "boa" (ex.: Bugs caindo não explica
-         queda de throughput), via max(0, ...).
-      2. Força total do sinal = Σ desvio_f  (já zerados onde negativos).
-      3. delta_throughput = (tp_média - tp_atual) / tp_média  (queda relativa);
-         fração_explicada = min(1, força_total / delta_throughput). Se os sinais
-         combinados forem pequenos perante a queda, a maior parte vira "normal".
-      4. Cada causa recebe: fração_explicada * (desvio_f / força_total) * 100%.
-         "Variação normal" recebe (1 - fração_explicada) * 100%.
-
-    Retorna: lista de {"label", "pct"} ordenada desc, ou [] se inconclusivo.
-    """
-    months = list(period_months)
-    if len(months) < 3:
-        return []
-
-    # Queda relativa do throughput (mês mais recente vs. média do período).
-    tp_s = pd.Series([float(tp_by_month.get(m, 0)) for m in months])
-    tp_mean = tp_s.mean()
-    tp_last = tp_s.iloc[-1]
-    delta_throughput = (tp_mean - tp_last) / tp_mean if tp_mean > 0 else 0.0
-    if delta_throughput <= 0:
-        return []
-
-    lower_type = team_df["issuetype"].astype(str).str.lower()
-
-    def _created_counts(sub: pd.DataFrame) -> pd.Series:
-        cm = sub["created"].dt.to_period("M").astype(str)
-        vc = cm.value_counts().to_dict()
-        return pd.Series([float(vc.get(m, 0)) for m in months])
-
-    bugs = _created_counts(team_df[lower_type == "bug"])
-    incidents = _created_counts(team_df[lower_type == "incidente"])
-
-    # Aging: backlog "envelhecido" (>30d em aberto) reconstruído ao fim de cada
-    # mês — item criado há mais de 30 dias e ainda não resolvido naquela data.
-    aging_vals = []
-    for m in months:
-        t_end = pd.Period(m, freq="M").end_time
-        cutoff = t_end - pd.Timedelta(days=30)
-        aged = team_df[
-            (team_df["created"] <= cutoff)
-            & (team_df["resolutiondate"].isna() | (team_df["resolutiondate"] > t_end))
-        ]
-        aging_vals.append(float(len(aged)))
-    aging = pd.Series(aging_vals)
-
-    factors = {"Aging": aging, "Bugs": bugs, "Incidentes": incidents}
-
-    # 1. Desvio % de cada fator vs. a própria média, clipado na direção "ruim".
-    #    Subir Aging/Bugs/Incidentes é o que pode explicar queda de throughput;
-    #    cair vai na direção boa, então zera (não explica a queda).
-    deviations = {}
-    for label, series in factors.items():
-        mean = series.mean()
-        last = series.iloc[-1]
-        deviations[label] = max(0.0, (last - mean) / mean) if mean > 0 else 0.0
-
-    # 2. Força total do sinal.
-    total_signal = sum(deviations.values())
-    if total_signal <= 0:
-        return [{"label": "Variação normal", "pct": 100.0}]
-
-    # 3. Fração explicada: sinais pequenos perante a queda → sobra vira "normal".
-    explained = min(1.0, total_signal / delta_throughput)
-
-    # 4. Distribui a fração explicada entre as causas, proporcional ao desvio.
-    parts = []
-    shown_pct = 0.0
-    for label, dev in deviations.items():
-        pct = explained * (dev / total_signal) * 100
-        if pct >= 1:
-            parts.append({"label": label, "pct": pct})
-            shown_pct += pct
-    # Sobra (1 - fração_explicada, mais causas < 1% descartadas) = variação normal.
-    parts.append({"label": "Variação normal", "pct": 100.0 - shown_pct})
-    parts.sort(key=lambda d: d["pct"], reverse=True)
-    return parts
-
-
 def _consecutive_tail(values: list, pred) -> int:
     n = 0
     for v in reversed(values):
@@ -235,7 +105,6 @@ def _month_detail(month_ym: str, filt_df: pd.DataFrame, monthly_df: pd.DataFrame
     )
     avg_ct = m_data["ct"].mean()
 
-    # Previous month within the period
     sorted_months = sorted(monthly_df["res_month"].tolist())
     prev_count: int | None = None
     prev_label = "—"
@@ -323,9 +192,8 @@ def _month_detail(month_ym: str, filt_df: pd.DataFrame, monthly_df: pd.DataFrame
 def main():
     render_squad_health()
 
-    df = load_jira_issues_from_csv(DATA_PATH)
+    df = _load_issues()
 
-    # res_month based on resolutiondate (completion), not created
     resolved = df[df["is_resolved"]].copy()
     resolved["res_month"] = resolved["resolutiondate"].dt.to_period("M").astype(str)
 
@@ -336,90 +204,90 @@ def main():
         st.error("Sem itens resolvidos para exibir.")
         return
 
-    # ── Top-bar filters (no sidebar) ────────────────────────────────────────
+    # ── Top-bar filters ──────────────────────────────────────────────────────
     fc1, fc2, fc3, _ = st.columns([1.5, 1.8, 1.8, 5])
     with fc1:
         selected_team = st.selectbox("Time", teams)
     with fc2:
-        selected_start = st.select_slider("De", options=months, value=months[0])
+        if len(months) > 1:
+            selected_start = st.select_slider("De", options=months, value=months[0])
+        else:
+            selected_start = months[0]
+            st.caption(f"De: {fmt_month(months[0])}")
     with fc3:
-        selected_end = st.select_slider("Até", options=months, value=months[-1])
+        if len(months) > 1:
+            selected_end = st.select_slider("Até", options=months, value=months[-1])
+        else:
+            selected_end = months[0]
+            st.caption(f"Até: {fmt_month(months[0])}")
 
     if selected_start > selected_end:
         st.warning("Período inválido: início deve ser anterior ao fim.")
         return
 
+    # ── Core calculation via core_metrics ───────────────────────────────────
+    team_arg = selected_team if selected_team != "Todos" else None
+    tp = compute_throughput(df, team=team_arg, start_month=selected_start, end_month=selected_end)
+
+    if not tp:
+        st.error("Sem dados para o filtro selecionado.")
+        return
+
+    # Unpack result
+    monthly_list = tp["monthly"]
+    closed_list  = tp["closed"]
+    wip          = tp["wip"]
+    avg_val      = tp["avg"]
+    cv           = tp["cv"]
+    n_months     = tp["n_months"]
+    total        = tp["total"]
+    best_m       = tp["best"]
+    worst_m      = tp["worst"]
+    trend        = tp["trend"]
+    health       = tp["health"]
+    pred         = tp["predictability"]
+    drop_pct     = tp["drop_pct"]
+
+    closed_counts = [m["count"] for m in closed_list]
+    last_count = float(closed_counts[-1]) if closed_counts else 0.0
+
+    # Convert to DataFrames for Altair (keep column names the chart expects)
+    monthly = pd.DataFrame([
+        {"res_month": m["month"], "month_label": m["label"],
+         "count": m["count"], "is_wip": m["is_wip"]}
+        for m in monthly_list
+    ])
+    closed = pd.DataFrame([
+        {"res_month": m["month"], "month_label": m["label"], "count": m["count"]}
+        for m in closed_list
+    ])
+
+    # Filtered resolved issues for type chart, table, and month-detail dialog
     filt = resolved[
         (resolved["res_month"] >= selected_start) & (resolved["res_month"] <= selected_end)
     ].copy()
     if selected_team != "Todos":
         filt = filt[filt["team"] == selected_team]
 
-    if filt.empty:
-        st.error("Sem dados para o filtro selecionado.")
-        return
-
-    # ── Monthly aggregation ──────────────────────────────────────────────────
-    monthly = (
-        filt.groupby("res_month").size()
-        .reset_index(name="count")
-        .sort_values("res_month")
-    )
-    monthly["month_label"] = monthly["res_month"].apply(fmt_month)
-
-    # ── Separate WIP (most recent, in progress) from closed months ────────────
-    # The most recent month is always "in progress" and excluded from every KPI
-    # baseline, trend, health and diagnostic calculation — matching the same
-    # finalized=False rule used in metric_snapshots. It still appears in the
-    # chart, visually distinguished. When only one month exists, no WIP split.
-    monthly["is_wip"] = False
-    if len(monthly) > 1:
-        monthly.loc[monthly.index[-1], "is_wip"] = True
-        closed = monthly.iloc[:-1].copy()
-    else:
-        closed = monthly.copy()
-    wip_row = monthly[monthly["is_wip"]].iloc[0] if monthly["is_wip"].any() else None
-
-    closed_counts = closed["count"].tolist()
-    n_months = len(closed_counts)                           # closed months only
-    total = int(sum(closed_counts))
-    avg_val = sum(closed_counts) / n_months if n_months else 0.0
-
-    best_row = closed.loc[closed["count"].idxmax()] if not closed.empty else monthly.iloc[0]
-    worst_row = closed.loc[closed["count"].idxmin()] if not closed.empty else monthly.iloc[0]
-    last_count = float(closed_counts[-1]) if closed_counts else 0.0
-
-    # ── Period split: first half = histórico, second half = recente ──────────
+    # avg_pct: recent half vs historic half (used in header and badge)
     split_idx = max(1, n_months // 2)
-    hist_counts = closed_counts[:split_idx]
+    hist_counts   = closed_counts[:split_idx]
     recent_counts = closed_counts[split_idx:]
-    hist_avg = sum(hist_counts) / len(hist_counts) if hist_counts else None
+    hist_avg   = sum(hist_counts)   / len(hist_counts)   if hist_counts   else None
     recent_avg = sum(recent_counts) / len(recent_counts) if recent_counts else None
-
-    # pct_change: recente vs histórico (only meaningful with >= 3 closed months)
     avg_pct: float | None = None
     if hist_avg and recent_avg and hist_avg > 0 and n_months >= 3:
         avg_pct = (recent_avg - hist_avg) / hist_avg * 100
 
-    # ── Trend & health (closed months only) ──────────────────────────────────
-    trend_label, trend_icon, trend_color, trend_desc = _compute_trend(closed_counts, avg_val)
-    cv = (closed["count"].std() / avg_val) if (avg_val > 0 and n_months > 1) else 0.0
-    health_label, health_emoji, health_color, health_desc = _compute_health(
-        trend_label, last_count, avg_val, cv
-    )
-
-    # ── Header with inline summary ───────────────────────────────────────────
-    # Icon, color and label always come from _compute_trend (same source as the
-    # Tendência card) so they can never contradict each other. avg_pct is used
-    # only to quantify the magnitude when it agrees with trend_label.
-    summary_color = trend_color
+    # ── Header ───────────────────────────────────────────────────────────────
+    summary_color = trend["color"]
     n_recent = len(recent_counts)
-    if trend_label == "Crescimento" and avg_pct is not None:
+    if trend["label"] == "Crescimento" and avg_pct is not None:
         summary_txt = f"Crescimento de {abs(avg_pct):.0f}% nos últimos {n_recent} meses"
-    elif trend_label == "Queda" and avg_pct is not None:
+    elif trend["label"] == "Queda" and avg_pct is not None:
         summary_txt = f"Queda de {abs(avg_pct):.0f}% nos últimos {n_recent} meses"
     else:
-        summary_txt = trend_desc
+        summary_txt = trend["desc"]
 
     st.markdown(
         f'<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\','
@@ -429,11 +297,11 @@ def main():
         f'<div style="font-size:13px;color:#64748b;margin-bottom:8px;">'
         f'Itens concluídos por mês</div>'
         f'<div style="font-size:13px;">'
-        f'<span style="font-weight:600;color:{health_color};">'
-        f'{health_emoji} Saúde: {health_label}</span>'
+        f'<span style="font-weight:600;color:{health["color"]};">'
+        f'{health["emoji"]} Saúde: {health["label"]}</span>'
         f'<span style="color:#cbd5e1;margin:0 8px;">·</span>'
         f'<span style="font-weight:600;color:{summary_color};">'
-        f'{trend_icon} {summary_txt}</span>'
+        f'{trend["icon"]} {summary_txt}</span>'
         f'</div></div>',
         unsafe_allow_html=True,
     )
@@ -443,7 +311,6 @@ def main():
     # ── 7 KPI cards ──────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 
-    # Card 1: Média/Mês — badge = variação recente vs histórico
     if avg_pct is not None:
         avg_badge = f"{'↑' if avg_pct >= 0.5 else ('↓' if avg_pct <= -0.5 else '→')} {abs(avg_pct):.0f}%"
         avg_badge_color = "#15803d" if avg_pct >= 0.5 else ("#dc2626" if avg_pct <= -0.5 else "#94a3b8")
@@ -458,78 +325,68 @@ def main():
             badge_color=avg_badge_color,
         ))
 
-    # Card 2: Total (closed months only; WIP count shown as badge)
     with c2:
         st.html(_card(
             "Total no Período",
             f'<span style="color:#0f172a;">{total}</span>',
             sub=f"{n_months} {'mês' if n_months == 1 else 'meses'} fechados",
-            badge=f"+ {int(wip_row['count'])} em andamento" if wip_row is not None else "",
+            badge=f"+ {wip['count']} em andamento" if wip is not None else "",
             badge_color="#94a3b8",
         ))
 
-    # Card 3: Melhor mês — badge = % acima da média
-    best_pct = (best_row["count"] - avg_val) / avg_val * 100 if avg_val > 0 else 0
+    best_pct = (best_m["count"] - avg_val) / avg_val * 100 if avg_val > 0 else 0
     best_badge = f"↑ {best_pct:.0f}%" if best_pct >= 0.5 else "= média"
     best_badge_color = "#15803d" if best_pct >= 0.5 else "#94a3b8"
     with c3:
         st.html(_card(
             "Melhor Mês",
-            f'<span style="color:#0f172a;">{int(best_row["count"])}</span>',
-            sub=best_row["month_label"],
+            f'<span style="color:#0f172a;">{int(best_m["count"])}</span>',
+            sub=best_m["label"],
             badge=best_badge,
             badge_color=best_badge_color,
         ))
 
-    # Card 4: Pior mês — badge = % abaixo da média
-    worst_pct = (worst_row["count"] - avg_val) / avg_val * 100 if avg_val > 0 else 0
+    worst_pct = (worst_m["count"] - avg_val) / avg_val * 100 if avg_val > 0 else 0
     worst_badge = f"↓ {abs(worst_pct):.0f}%" if worst_pct <= -0.5 else "= média"
     worst_badge_color = "#dc2626" if worst_pct <= -0.5 else "#94a3b8"
     with c4:
         st.html(_card(
             "Pior Mês",
-            f'<span style="color:#0f172a;">{int(worst_row["count"])}</span>',
-            sub=worst_row["month_label"],
+            f'<span style="color:#0f172a;">{int(worst_m["count"])}</span>',
+            sub=worst_m["label"],
             badge=worst_badge,
             badge_color=worst_badge_color,
         ))
 
-    # Card 5: Tendência
     with c5:
         st.html(_card(
             "Tendência",
-            f'<span style="color:{trend_color};">{trend_icon} {trend_label}</span>',
-            sub=trend_desc,
+            f'<span style="color:{trend["color"]};">{trend["icon"]} {trend["label"]}</span>',
+            sub=trend["desc"],
         ))
 
-    # Card 6: Saúde do Throughput
     with c6:
         st.html(_card(
             "Saúde",
-            f'<span style="color:{health_color};">{health_emoji} {health_label}</span>',
-            sub=health_desc,
+            f'<span style="color:{health["color"]};">{health["emoji"]} {health["label"]}</span>',
+            sub=health["desc"],
         ))
 
-    # Card 7: Previsibilidade — coeficiente de variação do throughput mensal
-    pred_label, pred_emoji, pred_color = _compute_predictability(cv)
     with c7:
         st.html(_card(
             "Previsibilidade",
-            f'<span style="color:{pred_color};">{pred_emoji} {pred_label}</span>',
+            f'<span style="color:{pred["color"]};">{pred["emoji"]} {pred["label"]}</span>',
             sub=f"Desvio histórico: {cv * 100:.0f}%",
         ))
 
     st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
 
-    # ── Bar chart (full width) with click-to-drill-down ──────────────────────
-    # tp_last_clicked prevents the dialog from reopening automatically after
-    # the user closes it (the Vega-Lite selection stays active across reruns).
+    # ── Bar chart with click-to-drill-down ───────────────────────────────────
     if "tp_last_clicked" not in st.session_state:
         st.session_state.tp_last_clicked = None
 
     bar_sel = alt.selection_point(name="bar_click", fields=["res_month"])
 
-    # Closed bars: indigo; WIP bar: gray — is_wip column set in the split above.
     bars = (
         alt.Chart(monthly)
         .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
@@ -539,8 +396,8 @@ def main():
             y=alt.Y("count:Q", title="Itens concluídos", axis=alt.Axis(grid=True)),
             color=alt.condition(
                 alt.datum.is_wip,
-                alt.value("#94a3b8"),   # in-progress month → gray
-                alt.value("#6366f1"),   # closed months → indigo
+                alt.value("#94a3b8"),
+                alt.value("#6366f1"),
             ),
             opacity=alt.condition(bar_sel, alt.value(1.0), alt.value(0.7)),
             tooltip=[
@@ -580,9 +437,6 @@ def main():
     )
     st.caption("Clique em uma barra para ver os detalhes do mês.")
 
-    # Open detail dialog only when a NEW month is clicked.
-    # Same-month click after dialog close is intentionally ignored — user
-    # must click elsewhere to deselect before re-opening the same month.
     sel_items = (event.selection or {}).get("bar_click", [])
     clicked = sel_items[0].get("res_month") if sel_items else None
     if clicked and clicked != st.session_state.tp_last_clicked:
@@ -591,7 +445,7 @@ def main():
     elif not clicked:
         st.session_state.tp_last_clicked = None
 
-    # ── Horizontal type chart + Insights ────────────────────────────────────
+    # ── Type distribution + Insights ─────────────────────────────────────────
     type_counts = filt.groupby("issuetype").size().reset_index(name="count")
     type_counts["pct"] = (type_counts["count"] / type_counts["count"].sum() * 100).round(1)
     type_counts["pct_label"] = type_counts["pct"].apply(lambda p: f"{p:.0f}%")
@@ -664,14 +518,11 @@ def main():
 
         bullets: list[str] = []
 
-        # 1. Peak month (closed months only — WIP excluded)
-        best_i = closed.loc[closed["count"].idxmax()] if not closed.empty else monthly.iloc[0]
         bullets.append(
-            f"Maior throughput em **{best_i['month_label']}** com {int(best_i['count'])} itens."
+            f"Maior throughput em **{best_m['label']}** com {int(best_m['count'])} itens."
         )
 
-        # 2. Most recent CLOSED month vs avg (WIP excluded)
-        last_label = closed.iloc[-1]["month_label"] if not closed.empty else monthly.iloc[-1]["month_label"]
+        last_label = closed_list[-1]["label"] if closed_list else monthly_list[-1]["label"]
         last_pct = (last_count - avg_val) / avg_val * 100 if avg_val > 0 else 0
         direction = "acima" if last_pct >= 0 else "abaixo"
         bullets.append(
@@ -679,7 +530,6 @@ def main():
             f"— {abs(last_pct):.0f}% {direction} da média ({avg_val:.1f})."
         )
 
-        # 3. Dominant type
         if not type_counts.empty:
             top = type_counts.iloc[0]
             bullets.append(
@@ -687,7 +537,6 @@ def main():
                 f"({top['pct']:.0f}% dos itens concluídos)."
             )
 
-        # 4. Consecutive run above or below avg
         n_above = _consecutive_tail(closed_counts, lambda c: c > avg_val)
         n_below = _consecutive_tail(closed_counts, lambda c: c < avg_val)
         if n_above >= 2:
@@ -698,17 +547,12 @@ def main():
         for b in bullets:
             st.markdown(f"- {b}")
 
-    # ── Diagnóstico da queda (heurístico) ────────────────────────────────────
-    # Só aparece quando o mês mais recente cai de forma relevante vs. a média do
-    # período. A decomposição é uma APROXIMAÇÃO HEURÍSTICA (ver _diagnose_drop),
-    # não uma análise causal real.
-    # drop_pct: last CLOSED month vs closed baseline — WIP month never triggers this
-    drop_pct = (avg_val - last_count) / avg_val * 100 if avg_val > 0 else 0.0
+    # ── Diagnóstico da queda ──────────────────────────────────────────────────
     if drop_pct >= DROP_THRESHOLD_PCT:
-        tp_by_month = dict(zip(closed["res_month"], closed["count"]))
-        period_months = closed["res_month"].tolist()
+        closed_month_keys = [m["month"] for m in closed_list]
+        tp_by_month = {m["month"]: m["count"] for m in closed_list}
         team_df = df if selected_team == "Todos" else df[df["team"] == selected_team]
-        parts = _diagnose_drop(period_months, tp_by_month, team_df)
+        parts = diagnose_throughput_drop(closed_month_keys, tp_by_month, team_df)
         if parts:
             st.markdown(
                 '<div style="font-size:11px;font-weight:700;color:#94a3b8;'
@@ -755,7 +599,7 @@ def main():
                 "como variação normal."
             )
 
-    # ── Last 50 completed items ───────────────────────────────────────────────
+    # ── Últimos 50 itens concluídos ───────────────────────────────────────────
     st.markdown(
         '<div style="font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;'
         'letter-spacing:.07em;margin:20px 0 8px;">Últimos 50 Itens Concluídos</div>',

@@ -7,6 +7,7 @@ Usage:
 """
 import argparse
 import math
+import re
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -22,6 +23,48 @@ METRIC_COLUMNS = [
     ("lead_time", "lead_time_days"),
     ("deployment_count", "deployment_count"),
 ]
+
+# Teams used for round-robin assignment when Jira returns no team data.
+# Applied automatically after every sync so the assignment survives re-syncs.
+# Remove / replace with real Jira team mapping when the Team field is populated.
+_ROUND_ROBIN_TEAMS = ["Time Alfa", "Time Beta", "Time Gama"]
+
+
+def _numeric_key(key: str) -> int:
+    m = re.search(r"\d+", key or "")
+    return int(m.group()) if m else 0
+
+
+def assign_teams_round_robin(session: Session) -> int:
+    """Assign teams cyclically when all issues_raw rows have team='Unknown'.
+
+    Sorts issues numerically by key (TD-1, TD-2, ...) and assigns
+    _ROUND_ROBIN_TEAMS in a cycle.  Updates both issues_raw and
+    issue_transitions so team filters work across both tables.
+
+    Returns the number of rows updated, or 0 if skipped (real team data present).
+    """
+    rows = session.query(IssueRaw.key, IssueRaw.team).all()
+    if not rows:
+        return 0
+
+    # Skip if any row already has a real team value from Jira.
+    has_real_teams = any(
+        r.team and r.team != "Unknown"
+        for r in rows
+    )
+    if has_real_teams:
+        return 0
+
+    keys_sorted = sorted([r.key for r in rows], key=_numeric_key)
+    n = len(_ROUND_ROBIN_TEAMS)
+    updated = 0
+    for i, key in enumerate(keys_sorted):
+        team = _ROUND_ROBIN_TEAMS[i % n]
+        session.query(IssueRaw).filter_by(key=key).update({"team": team})
+        session.query(IssueTransition).filter_by(issue_key=key).update({"team": team})
+        updated += 1
+    return updated
 
 
 def _safe_float(value):
@@ -250,6 +293,15 @@ def main():
         t_count = sync_transitions(session, transitions)
         session.commit()
         print(f"[OK] issue_transitions synced: {t_count} rows written")
+
+        # 3c. Round-robin team assignment (only when Jira returns no team data)
+        rr_count = assign_teams_round_robin(session)
+        session.commit()
+        if rr_count:
+            teams_str = ", ".join(_ROUND_ROBIN_TEAMS)
+            print(f"[OK] Round-robin team assignment applied: {rr_count} issues -> [{teams_str}]")
+        else:
+            print("[--] Team assignment skipped (real team data present in Jira)")
 
         # 4. Reload from DB (single source of truth for metrics)
         df = load_issues_from_db(session)
