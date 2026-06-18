@@ -3,6 +3,8 @@ import altair as alt
 import streamlit as st
 
 from core_metrics import (
+    TERMINAL_STATUSES,
+    compute_aging,
     compute_throughput,
     diagnose_throughput_drop,
     prepare_df,
@@ -546,6 +548,89 @@ def main():
 
         for b in bullets:
             st.markdown(f"- {b}")
+
+    # ── Diagnóstico & Recomendação ────────────────────────────────────────────
+    # Rule 1: TP direction vs. previous closed month + current aging state
+    rule1_diag: str | None = None
+    rule1_rec:  str | None = None
+    if len(closed_list) >= 2:
+        tp_cur  = closed_list[-1]["count"]
+        tp_prev = closed_list[-2]["count"]
+        aging = compute_aging(df, team=team_arg)
+        pct_crit = (
+            (aging["bands"]["30–60d"] + aging["bands"]["60+d"]) / aging["total_open"]
+            if aging["total_open"] > 0 else 0.0
+        )
+        if tp_cur > tp_prev and pct_crit < 0.20:
+            rule1_diag = (
+                "Os itens abertos estão sendo resolvidos mais rápido, "
+                "o que ajudou a aumentar as entregas neste período."
+            )
+            rule1_rec = "Continue revisando os itens parados com regularidade — está funcionando."
+        elif tp_cur < tp_prev and pct_crit > 0.30:
+            rule1_diag = (
+                "Itens estão demorando mais para avançar, "
+                "o que pode estar reduzindo as entregas."
+            )
+            rule1_rec = "Vale dar atenção aos itens mais antigos antes que isso afete ainda mais as entregas."
+
+    # Rule 2: bottleneck — non-terminal status with disproportionate volume of open items
+    rule2_diag: str | None = None
+    rule2_rec:  str | None = None
+    open_now = df if selected_team == "Todos" else df[df["team"] == selected_team]
+    open_now = open_now[~open_now["is_resolved"]]
+    if not open_now.empty:
+        sc = open_now.groupby("status").size()
+        active_st = [s for s in sc.index if s.strip().lower() not in TERMINAL_STATUSES]
+        if len(active_st) >= 2:
+            bk = max(active_st, key=lambda s: sc.get(s, 0))
+            mean_sc = sum(sc.get(s, 0) for s in active_st) / len(active_st)
+            if mean_sc > 0 and sc.get(bk, 0) / mean_sc > 2.0:
+                rule2_diag = (
+                    f"Muitos itens estão ficando parados em **{bk}**, "
+                    "o que pode estar represando as entregas."
+                )
+                rule2_rec = f"Vale entender o que está travando os itens parados em **{bk}**."
+
+    # Rule 3: low predictability
+    rule3_diag: str | None = None
+    rule3_rec:  str | None = None
+    if pred["label"] == "Baixa":
+        rule3_diag = (
+            "O volume de entregas tem variado bastante de mês a mês, "
+            "dificultando prever o ritmo futuro."
+        )
+        rule3_rec = (
+            "Antes de assumir compromissos de prazo, "
+            "vale entender por que o volume está tão instável."
+        )
+
+    diag_items = [d for d in [rule1_diag, rule2_diag, rule3_diag] if d]
+    rec_items  = [r for r in [rule1_rec,  rule2_rec,  rule3_rec]  if r]
+
+    st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:11px;font-weight:700;color:#94a3b8;'
+        'text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px;">'
+        'Diagnóstico &amp; Recomendação</div>',
+        unsafe_allow_html=True,
+    )
+    if not diag_items:
+        st.markdown(
+            '<span style="font-size:13px;color:#94a3b8;">'
+            'Nenhum fator de destaque identificado neste período.</span>',
+            unsafe_allow_html=True,
+        )
+    else:
+        col_d, col_r = st.columns(2, gap="large")
+        with col_d:
+            st.markdown("**🔍 Diagnóstico**")
+            for d in diag_items:
+                st.markdown(f"- {d}")
+        with col_r:
+            st.markdown("**🎯 Recomendação**")
+            for r in rec_items:
+                st.markdown(f"- {r}")
 
     # ── Diagnóstico da queda ──────────────────────────────────────────────────
     if drop_pct >= DROP_THRESHOLD_PCT:
