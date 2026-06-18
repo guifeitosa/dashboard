@@ -10,7 +10,7 @@ O dashboard consolida quatro métricas DORA (Lead Time, Deployment Frequency, MT
 
 | Página | Descrição |
 |---|---|
-| **Home** | Visão consolidada: Squad Health, resumo de cada página, maior oportunidade de melhoria e alertas ativos |
+| **Home** | Visão consolidada: Squad Health, resumo de cada página, maior oportunidade de melhoria, **cadeias de diagnóstico** (Insight → Diagnóstico → Recomendação) e alertas ativos |
 | **DORA Executivo** | Tabela detalhada das 4 métricas DORA por mês, faixas Elite/High/Medium/Low, sparklines e diagnóstico de mudança de faixa |
 | **Throughput** | Entregas mensais com exclusão do mês em andamento (WIP), tendência, previsibilidade (CV) e diagnóstico automático |
 | **Aging** | Itens em aberto por tempo de criação, histograma por faixa, KPI de itens sem movimentação e diagnóstico automático |
@@ -38,7 +38,9 @@ app.py  (entry point Streamlit)
    └── pages/fluxo.py
          │
          ├── core_metrics.py   ← camada central de cálculo (DORA, Throughput,
-         │                        Aging, Scoring, Squad Health)
+         │                        Aging, Scoring, Squad Health, Diagnósticos)
+         ├── insights.py       ← InsightEvent dataclass + InsightEngine
+         │                        (orquestra os 4 analisadores e a cadeia de causalidade)
          ├── status_time.py    ← tempo por status a partir de transições
          ├── squad_health.py   ← card visual do Squad Health (delega a core_metrics)
          └── metrics.py        ← cálculos DORA legados (calculate_metrics_summary)
@@ -123,6 +125,7 @@ streamlit run app.py
 ```
 ├── app.py                            # Entry point Streamlit (navegação, seletor global de time, CSS)
 ├── core_metrics.py                   # Camada central: DORA, Throughput, Aging, Scoring, Diagnósticos
+├── insights.py                       # InsightEvent dataclass + InsightEngine (4 analisadores)
 ├── status_time.py                    # Tempo por status a partir de histórico de transições
 ├── squad_health.py                   # Squad Health Score + card visual reutilizável
 ├── metrics.py                        # Cálculos DORA legados (calculate_metrics_summary)
@@ -146,6 +149,7 @@ streamlit run app.py
 ├── test_throughput_diagnostics.py    # Testes: diagnóstico de Throughput
 ├── test_aging_diagnostics.py         # Testes: diagnóstico de Aging
 ├── test_dora_diagnostics.py          # Testes: diagnóstico DORA
+├── test_insights.py                  # Testes: InsightEngine (run, flow, related_ids, sem duplicatas)
 ├── test_smoke.py                     # Smoke tests: todas as páginas via AppTest
 └── docs/
     └── metricas.md                   # Fórmulas, diagnósticos, Squad Health, limitações e glossário
@@ -156,7 +160,8 @@ streamlit run app.py
 ```bash
 # Suíte unitária completa
 pytest test_core_metrics.py test_snapshots.py test_status_time.py test_transitions.py \
-       test_throughput_diagnostics.py test_aging_diagnostics.py test_dora_diagnostics.py -v
+       test_throughput_diagnostics.py test_aging_diagnostics.py test_dora_diagnostics.py \
+       test_insights.py -v
 
 # Smoke tests (todas as páginas × todos os times, requer metrics_demo.db)
 $env:DASHBOARD_DB_PATH = "metrics_demo.db"
@@ -172,6 +177,7 @@ pytest test_smoke.py -v
 | `test_throughput_diagnostics.py` | Regras de diagnóstico de Throughput (3 regras) |
 | `test_aging_diagnostics.py` | Regras de diagnóstico de Aging (3 regras + enriquecimentos de Regra 2) |
 | `test_dora_diagnostics.py` | Regras de diagnóstico DORA (faixa deteriorada, faixa melhorada, cruzamento CFR × Deploy Freq) |
+| `test_insights.py` | InsightEngine: run retorna lista ordenada, flow detecta status dominante, related_ids válidos, sem IDs duplicados |
 | `test_smoke.py` | AppTest: 5 páginas × 4 filtros de time = 20 casos sem exceção |
 
 ## Documentação técnica
