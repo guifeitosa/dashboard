@@ -985,8 +985,10 @@ def build_throughput_diagnostics(
     pred: dict,
     *,
     today: Optional[datetime.date] = None,
-) -> tuple[list[str], list[str]]:
-    """Interpret throughput data and return (diag_items, rec_items) for display.
+    team_label: str = "Todos",
+    period: str = "",
+) -> list:
+    """Interpret throughput data and return list[InsightEvent].
 
     Three rules, evaluated independently — each fires at most once:
       Rule 1 (Aging × TP):    compares last two closed months and current aging state.
@@ -1001,15 +1003,39 @@ def build_throughput_diagnostics(
     team        : str|None    — active team filter; None = all teams
     pred        : dict        — from compute_predictability(); requires key "label"
     today       : date|None   — reference date for aging (defaults to date.today())
+    team_label  : str         — display label for the team (for event metadata)
+    period      : str         — YYYY-MM period string (for event IDs and metadata)
 
     Returns
     -------
-    (diag_items, rec_items) — parallel lists of strings, one entry per fired rule.
-    An empty pair means no rule fired.
+    list[InsightEvent] — one insight+recommendation pair per fired rule.
+    An empty list means no rule fired.
     """
+    from insights import InsightEvent
+
     df = prepare_df(df)
-    diag: list[str] = []
-    rec:  list[str] = []
+    events: list[InsightEvent] = []
+    _ctr: dict[str, int] = {}
+
+    def _nid(cat: str, sev: str) -> str:
+        base = f"{cat}_{sev}_{period}"
+        n = _ctr.get(base, 0)
+        _ctr[base] = n + 1
+        return base if n == 0 else f"{base}_{n}"
+
+    def _mk(cat, sev, layer, title, desc, evidence, related=None):
+        return InsightEvent(
+            id=_nid(cat, sev),
+            severity=sev,
+            category=cat,
+            layer=layer,
+            title=title,
+            description=desc,
+            evidence=evidence or {},
+            related_ids=related or [],
+            team=team_label,
+            period=period,
+        )
 
     # Rule 1: TP direction vs. previous closed month + current aging state.
     # "Aging OK"  = <20% of open items older than 30 days.
@@ -1023,47 +1049,82 @@ def build_throughput_diagnostics(
             if aging["total_open"] > 0 else 0.0
         )
         if tp_cur > tp_prev and pct_crit < 0.20:
-            diag.append(
-                "Os itens abertos estão sendo resolvidos mais rápido, "
-                "o que ajudou a aumentar as entregas neste período."
+            ins = _mk(
+                "throughput", "info", "insight",
+                "As entregas aceleraram e o backlog está saudável",
+                f"O time entregou {tp_cur} itens — mais que os {tp_prev} do mês anterior — "
+                "e o backlog continua enxuto. Bom sinal de ritmo sustentável.",
+                {"tp_cur": tp_cur, "tp_prev": tp_prev, "pct_crit": pct_crit},
             )
-            rec.append(
-                "Continue revisando os itens parados com regularidade — está funcionando."
+            rec = _mk(
+                "throughput", "info", "recommendation",
+                "Manter cadência de revisão",
+                "Continue revisando os itens parados com regularidade — está funcionando.",
+                {},
+                related=[ins.id],
             )
+            events.extend([ins, rec])
         elif tp_cur < tp_prev and pct_crit > 0.30:
-            diag.append(
-                "Itens estão demorando mais para avançar, "
-                "o que pode estar reduzindo as entregas."
+            ins = _mk(
+                "throughput", "high", "insight",
+                "As entregas caíram e o backlog está envelhecendo",
+                f"O time entregou {tp_cur} itens — menos que os {tp_prev} do mês anterior. "
+                "Ao mesmo tempo, mais de 30% dos itens abertos já está parado há mais de 30 dias. "
+                "Um pode estar causando o outro.",
+                {"tp_cur": tp_cur, "tp_prev": tp_prev, "pct_crit": pct_crit},
             )
-            rec.append(
-                "Vale dar atenção aos itens mais antigos antes que isso afete ainda mais as entregas."
+            rec = _mk(
+                "throughput", "info", "recommendation",
+                "Priorizar itens mais antigos",
+                "Atacar os itens mais antigos primeiro pode ajudar a destravar o fluxo "
+                "e voltar ao ritmo de antes.",
+                {},
+                related=[ins.id],
             )
+            events.extend([ins, rec])
 
     # Rule 2: bottleneck — delegates to shared diagnose_status_concentration().
     open_now = df if team is None else df[df["team"] == team]
     open_now = open_now[~open_now["is_resolved"]]
     bk = diagnose_status_concentration(open_now)
     if bk is not None:
-        diag.append(
-            f"Muitos itens estão ficando parados em **{bk}**, "
-            "o que pode estar represando as entregas."
+        ins = _mk(
+            "throughput", "high", "insight",
+            f"Muitos itens estão travados em '{bk}'",
+            f"A maioria dos itens em aberto está concentrada em '{bk}', "
+            "o que está represando as entregas do time.",
+            {"bottleneck_status": bk},
         )
-        rec.append(
-            f"Vale entender o que está travando os itens parados em **{bk}**."
+        rec = _mk(
+            "throughput", "info", "recommendation",
+            f"Investigar o que está acumulando em '{bk}'",
+            f"Vale conversar com o time sobre o que está acumulando em '{bk}'. "
+            "Uma sessão rápida pode destravar vários itens de uma vez.",
+            {},
+            related=[ins.id],
         )
+        events.extend([ins, rec])
 
     # Rule 3: low predictability.
     if pred.get("label") == "Baixa":
-        diag.append(
-            "O volume de entregas tem variado bastante de mês a mês, "
-            "dificultando prever o ritmo futuro."
+        ins = _mk(
+            "throughput", "medium", "insight",
+            "Volume de entregas muito irregular",
+            "As entregas mensais estão variando muito — uns meses são ótimos, outros caem bastante. "
+            "Isso torna difícil planejar prazos com confiança.",
+            {"pred_label": "Baixa"},
         )
-        rec.append(
-            "Antes de assumir compromissos de prazo, "
-            "vale entender por que o volume está tão instável."
+        rec = _mk(
+            "throughput", "info", "recommendation",
+            "Entender a causa da instabilidade antes de fechar prazos",
+            "Antes de assumir compromissos com outras áreas, vale investigar "
+            "por que o volume oscila tanto. Pode ser sazonalidade, gargalos pontuais ou mudança de prioridade.",
+            {},
+            related=[ins.id],
         )
+        events.extend([ins, rec])
 
-    return diag, rec
+    return events
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1083,8 +1144,10 @@ def build_aging_diagnostics(
     *,
     today: Optional[datetime.date] = None,
     prev_aging: Optional[dict] = None,
-) -> tuple[list[str], list[str]]:
-    """Interpret aging data and return (diag_items, rec_items) for display.
+    team_label: str = "Todos",
+    period: str = "",
+) -> list:
+    """Interpret aging data and return list[InsightEvent].
 
     Three rules, evaluated independently — each fires at most once:
       Rule 1 (Gargalo):         non-terminal status with > 2× mean open-item count.
@@ -1100,15 +1163,39 @@ def build_aging_diagnostics(
     prev_aging : optional dict from a previous compute_aging() call used for Rule 2.
                  When None, the trend rule is silently skipped.
                  When avg_age < 0 (migration artifact), the rule is also skipped.
+    team_label : str — display label for the team (for event metadata).
+    period     : str — YYYY-MM period string (for event IDs and metadata).
 
     Returns
     -------
-    (diag_items, rec_items) — parallel lists of strings, one entry per fired rule.
-    An empty pair means no rule fired.
+    list[InsightEvent] — one insight+recommendation pair per fired rule.
+    An empty list means no rule fired.
     """
+    from insights import InsightEvent
+
     df = prepare_df(df)
-    diag: list[str] = []
-    rec:  list[str] = []
+    events: list[InsightEvent] = []
+    _ctr: dict[str, int] = {}
+
+    def _nid(cat: str, sev: str) -> str:
+        base = f"{cat}_{sev}_{period}"
+        n = _ctr.get(base, 0)
+        _ctr[base] = n + 1
+        return base if n == 0 else f"{base}_{n}"
+
+    def _mk(cat, sev, layer, title, desc, evidence, related=None):
+        return InsightEvent(
+            id=_nid(cat, sev),
+            severity=sev,
+            category=cat,
+            layer=layer,
+            title=title,
+            description=desc,
+            evidence=evidence or {},
+            related_ids=related or [],
+            team=team_label,
+            period=period,
+        )
 
     cur = compute_aging(df, team=team, issuetype=issuetype, today=today)
     pct_crit = (
@@ -1123,8 +1210,22 @@ def build_aging_diagnostics(
     open_now = open_now[~open_now["is_resolved"]]
     bk = diagnose_status_concentration(open_now)
     if bk is not None:
-        diag.append(f"Muitos itens estão ficando parados em **{bk}**.")
-        rec.append(f"Vale entender o que está travando os itens parados em **{bk}**.")
+        ins = _mk(
+            "aging", "high", "insight",
+            f"Itens parados em '{bk}' há muito tempo",
+            f"A maioria dos itens abertos está acumulada em '{bk}' — "
+            "isso sugere um ponto de bloqueio no processo.",
+            {"bottleneck_status": bk},
+        )
+        rec = _mk(
+            "aging", "info", "recommendation",
+            f"Olhar o que está prendendo itens em '{bk}'",
+            f"Vale investigar por que os itens estão acumulando em '{bk}'. "
+            "Pode ser falta de revisor, dependência externa ou item sem dono claro.",
+            {},
+            related=[ins.id],
+        )
+        events.extend([ins, rec])
 
     # Rule 2: aging trend vs. previous snapshot.
     # Guard: skip when prev_aging is absent or has a negative avg_age (migration
@@ -1156,78 +1257,122 @@ def build_aging_diagnostics(
 
         if worsened:
             if bk is not None:
-                diag.append(
-                    f"Os itens abertos estão demorando mais para avançar, "
-                    f"com concentração maior em **{bk}**."
+                desc = (
+                    f"Os itens estão levando mais tempo que no mês passado pra progredir — "
+                    f"e boa parte está acumulada em '{bk}'."
                 )
             else:
-                diag.append(
-                    "Os itens abertos estão demorando mais para avançar "
-                    "do que no período anterior."
+                desc = (
+                    "Os itens estão levando mais tempo que no mês passado pra progredir. "
+                    "Se isso continuar, vai impactar as entregas."
                 )
-            rec.append("Vale revisar os itens mais antigos antes que o atraso aumente.")
+            ins = _mk(
+                "aging", "high", "insight",
+                "Itens abertos demorando mais pra avançar",
+                desc,
+                {"age_delta": age_delta, "crit_delta": crit_delta, "bottleneck_status": bk},
+            )
+            rec = _mk(
+                "aging", "info", "recommendation",
+                "Atacar os itens mais antigos agora",
+                "Olhar os itens mais antigos e entender por que estão parados "
+                "pode evitar que o problema se agrave no próximo mês.",
+                {},
+                related=[ins.id],
+            )
+            events.extend([ins, rec])
         elif improved:
             if pct_crit > _AGING_STILL_CRITICAL_THRESHOLD:
-                diag.append(
-                    "Os itens abertos estão sendo resolvidos mais rápido que no período "
-                    "anterior, mas a situação ainda é crítica — vale manter atenção."
+                ins = _mk(
+                    "aging", "medium", "insight",
+                    "Backlog melhorou, mas ainda preocupa",
+                    "O tempo médio dos itens em aberto caiu em relação ao mês passado — bom sinal. "
+                    "Mas mais da metade dos itens ainda está acumulada há muito tempo.",
+                    {"age_delta": age_delta, "pct_crit": pct_crit},
                 )
-                rec.append(
-                    "O ritmo melhorou, mas mais da metade dos itens ainda está há muito "
-                    "tempo em aberto. Continue priorizando a revisão dos mais antigos."
+                rec = _mk(
+                    "aging", "info", "recommendation",
+                    "Manter o foco nos itens mais antigos",
+                    "Continue priorizando os itens mais antigos. "
+                    "O ritmo melhorou, mas ainda tem trabalho pra limpar o backlog.",
+                    {},
+                    related=[ins.id],
                 )
             else:
-                diag.append(
-                    "Os itens abertos estão sendo resolvidos mais rápido "
-                    "que no período anterior."
+                ins = _mk(
+                    "aging", "info", "insight",
+                    "Backlog está melhorando",
+                    "Os itens estão avançando mais rápido que no mês passado — boa tendência.",
+                    {"age_delta": age_delta, "pct_crit": pct_crit},
                 )
-                rec.append(
-                    "Continue priorizando a revisão de itens parados — está funcionando."
+                rec = _mk(
+                    "aging", "info", "recommendation",
+                    "Manter ritmo de revisão",
+                    "Continue priorizando a revisão de itens parados — está funcionando.",
+                    {},
+                    related=[ins.id],
                 )
+            events.extend([ins, rec])
 
     # Rule 3: sem movimentação — > 20% of open items with no update in 14 days.
     sem_mov = cur["sem_movimento"]
     if sem_mov is not None and cur["total_open"] > 0:
         if sem_mov / cur["total_open"] > 0.20:
-            diag.append(
-                "Vários itens não tiveram nenhuma atualização recente — "
-                "podem estar esquecidos ou travados em algum bloqueio."
+            ins = _mk(
+                "aging", "medium", "insight",
+                "Vários itens sem nenhuma atualização recente",
+                f"Mais de 20% dos itens abertos ({sem_mov} de {cur['total_open']}) "
+                "não receberam nenhuma atualização nos últimos 14 dias. "
+                "Podem estar esquecidos ou bloqueados.",
+                {"sem_movimento": sem_mov, "total_open": cur["total_open"]},
             )
-            rec.append(
-                "Vale checar se esses itens ainda são prioridade, "
-                "ou se podem ser replanejados."
+            rec = _mk(
+                "aging", "info", "recommendation",
+                "Verificar um por um: ainda são prioridade?",
+                "Vale checar cada item parado: ainda é prioridade? "
+                "Quem é o responsável? Há algum bloqueio que precisa ser resolvido?",
+                {},
+                related=[ins.id],
             )
+            events.extend([ins, rec])
 
-    return diag, rec
+    return events
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # DORA diagnostic rules
 # ────────────────────────────────────────────────────────────────────────────
 
-_DORA_METRIC_LABELS: dict[str, str] = {
-    "lead_time_days":       "Lead Time",
-    "deploy_freq_interval": "Deployment Frequency",
-    "mttr_hours":           "MTTR",
-    "cfr_percent":          "CFR",
+_DORA_TITLES_WORSENED: dict[str, str] = {
+    "lead_time_days":       "Entregas estão demorando mais pra chegar",
+    "deploy_freq_interval": "Deploys acontecendo com menos frequência",
+    "mttr_hours":           "Incidentes demorando mais pra ser resolvidos",
+    "cfr_percent":          "Mais deploys estão causando problemas",
+}
+
+_DORA_TITLES_IMPROVED: dict[str, str] = {
+    "lead_time_days":       "Entregas chegando mais rápido",
+    "deploy_freq_interval": "Deploy ficando mais frequente",
+    "mttr_hours":           "Incidentes sendo resolvidos mais rápido",
+    "cfr_percent":          "Deploys com menos falhas",
 }
 
 _DORA_RECS_WORSENED: dict[str, str] = {
-    "lead_time_days":       (
-        "Vale investigar o que está travando o fluxo de entrega, "
-        "como aprovações lentas ou retrabalho."
+    "lead_time_days": (
+        "Vale olhar onde o processo está travando — aprovações lentas, "
+        "filas de revisão ou retrabalho costumam ser os culpados."
     ),
     "deploy_freq_interval": (
-        "Vale entender se os deploys ficaram menos frequentes "
-        "por falta de prioridade ou por mais cautela."
+        "Vale entender se os deploys ficaram menos frequentes por falta de prioridade "
+        "ou se o time está sendo mais cauteloso depois de incidentes."
     ),
-    "mttr_hours":           (
-        "Vale revisar o processo de resposta a incidentes — pode estar "
-        "demorando mais pra detectar ou corrigir problemas."
+    "mttr_hours": (
+        "Vale revisar o processo de resposta a incidentes: o time está sendo acionado rápido? "
+        "Existe runbook claro? As causas raiz estão sendo endereçadas?"
     ),
-    "cfr_percent":          (
-        "Vale revisar as últimas mudanças que falharam "
-        "pra entender se há um padrão."
+    "cfr_percent": (
+        "Vale olhar as últimas mudanças que falharam em busca de padrão — "
+        "tipo de código, área do sistema, ou falta de testes."
     ),
 }
 
@@ -1235,8 +1380,11 @@ _DORA_RECS_WORSENED: dict[str, str] = {
 def build_dora_diagnostics(
     current: dict,
     prev: Optional[dict],
-) -> tuple[list[str], list[str]]:
-    """Interpret DORA metric band changes and return (diag_items, rec_items).
+    *,
+    team_label: str = "Todos",
+    period: str = "",
+) -> list:
+    """Interpret DORA metric band changes and return list[InsightEvent].
 
     Three rules, evaluated independently:
       Rule 1 (Faixa em deterioração): any metric's DORA band worsened vs. prev.
@@ -1246,20 +1394,52 @@ def build_dora_diagnostics(
 
     Parameters
     ----------
-    current : dict with keys lead_time_days, deploy_freq_interval, mttr_hours,
-              cfr_percent. None values mean no data for that metric — the rule
-              for that metric is silently skipped.
-    prev    : same shape for the previous closed month, or None to skip all rules.
+    current    : dict with keys lead_time_days, deploy_freq_interval, mttr_hours,
+                 cfr_percent. None values mean no data for that metric — the rule
+                 for that metric is silently skipped.
+    prev       : same shape for the previous closed month, or None to skip all rules.
+    team_label : str — display label for the team (for event metadata).
+    period     : str — YYYY-MM period string (for event IDs and metadata).
 
     Returns
     -------
-    (diag_items, rec_items) — parallel lists, one entry per fired rule.
+    list[InsightEvent] — one insight+recommendation pair per fired rule.
     """
-    diag: list[str] = []
-    rec:  list[str] = []
+    from insights import InsightEvent
+
+    events: list[InsightEvent] = []
+    _ctr: dict[str, int] = {}
 
     if prev is None:
-        return diag, rec
+        return events
+
+    # Key → category mapping
+    _KEY_CATEGORY = {
+        "lead_time_days":       "lead_time",
+        "deploy_freq_interval": "deployment",
+        "mttr_hours":           "mttr",
+        "cfr_percent":          "cfr",
+    }
+
+    def _nid(cat: str, sev: str) -> str:
+        base = f"{cat}_{sev}_{period}"
+        n = _ctr.get(base, 0)
+        _ctr[base] = n + 1
+        return base if n == 0 else f"{base}_{n}"
+
+    def _mk(cat, sev, layer, title, desc, evidence, related=None):
+        return InsightEvent(
+            id=_nid(cat, sev),
+            severity=sev,
+            category=cat,
+            layer=layer,
+            title=title,
+            description=desc,
+            evidence=evidence or {},
+            related_ids=related or [],
+            team=team_label,
+            period=period,
+        )
 
     # Rules 1 & 2: one entry per metric whose band changed.
     for key in ("lead_time_days", "deploy_freq_interval", "mttr_hours", "cfr_percent"):
@@ -1273,17 +1453,82 @@ def build_dora_diagnostics(
             continue
         cur_rank = _LEVEL_RANK[cur_band]
         prv_rank = _LEVEL_RANK[prv_band]
-        label = _DORA_METRIC_LABELS[key]
+        cat = _KEY_CATEGORY[key]
         if cur_rank > prv_rank:
-            diag.append(
-                f"{label} piorou de faixa: estava {prv_band} e agora está {cur_band}."
+            # Severity based on current band
+            if cur_band == "Low":
+                sev = "critical"
+            elif cur_band == "Medium":
+                sev = "high"
+            else:
+                sev = "medium"
+            _desc_worsened: dict[str, str] = {
+                "lead_time_days": (
+                    f"Cada entrega está levando mais tempo do início ao fim — "
+                    f"o Lead Time passou de {prv_band} para {cur_band}."
+                ),
+                "deploy_freq_interval": (
+                    f"O time está deployando com menos frequência — "
+                    f"a frequência passou de {prv_band} para {cur_band}."
+                ),
+                "mttr_hours": (
+                    f"Quando algo quebra, está demorando mais pra voltar ao normal — "
+                    f"o MTTR passou de {prv_band} para {cur_band}."
+                ),
+                "cfr_percent": (
+                    f"Mais deploys estão causando problemas — "
+                    f"a taxa de falha passou de {prv_band} para {cur_band}."
+                ),
+            }
+            ins = _mk(
+                cat, sev, "insight",
+                _DORA_TITLES_WORSENED[key],
+                _desc_worsened[key],
+                {"key": key, "cur_band": cur_band, "prv_band": prv_band,
+                 "cur_v": cur_v, "prv_v": prv_v},
             )
-            rec.append(_DORA_RECS_WORSENED[key])
+            rec = _mk(
+                cat, "info", "recommendation",
+                f"Investigar {_DORA_TITLES_WORSENED[key].lower()}",
+                _DORA_RECS_WORSENED[key],
+                {},
+                related=[ins.id],
+            )
+            events.extend([ins, rec])
         elif cur_rank < prv_rank:
-            diag.append(
-                f"{label} melhorou de faixa: estava {prv_band} e agora está {cur_band}."
+            _desc_improved: dict[str, str] = {
+                "lead_time_days": (
+                    f"Lead Time melhorou — estava {prv_band} e agora está {cur_band}. "
+                    "As entregas estão chegando mais rápido."
+                ),
+                "deploy_freq_interval": (
+                    f"Frequência de deploy melhorou de {prv_band} para {cur_band}. "
+                    "O time está entregando com mais regularidade."
+                ),
+                "mttr_hours": (
+                    f"MTTR melhorou de {prv_band} para {cur_band}. "
+                    "Incidentes estão sendo resolvidos mais rápido."
+                ),
+                "cfr_percent": (
+                    f"CFR melhorou de {prv_band} para {cur_band} — "
+                    "menos deploys estão causando problemas."
+                ),
+            }
+            ins = _mk(
+                cat, "info", "insight",
+                _DORA_TITLES_IMPROVED[key],
+                _desc_improved[key],
+                {"key": key, "cur_band": cur_band, "prv_band": prv_band,
+                 "cur_v": cur_v, "prv_v": prv_v},
             )
-            rec.append("Vale entender o que mudou e tentar manter essa prática.")
+            rec = _mk(
+                cat, "info", "recommendation",
+                "Entender o que mudou e manter essa prática",
+                "Vale registrar o que contribuiu pra essa melhora e garantir que continue.",
+                {},
+                related=[ins.id],
+            )
+            events.extend([ins, rec])
 
     # Rule 3: CFR up AND deploy interval up (fewer deploys) simultaneously.
     # Uses raw values — fires even when neither metric crossed a band boundary.
@@ -1294,13 +1539,21 @@ def build_dora_diagnostics(
     if (cur_cfr is not None and prv_cfr is not None
             and cur_freq is not None and prv_freq is not None
             and cur_cfr > prv_cfr and cur_freq > prv_freq):
-        diag.append(
-            "A frequência de deploy caiu no mesmo período em que a taxa de falhas subiu "
-            "— pode ser que o time esteja mais cauteloso depois das falhas."
+        ins = _mk(
+            "cfr", "medium", "insight",
+            "Time deployando menos depois de um período com mais falhas",
+            "A frequência de deploys caiu no mesmo período em que a taxa de falhas subiu. "
+            "O time pode estar com pé no freio depois de incidentes recentes.",
+            {"cur_cfr": cur_cfr, "prv_cfr": prv_cfr, "cur_freq": cur_freq, "prv_freq": prv_freq},
         )
-        rec.append(
-            "Vale conversar com o time pra entender se a cautela está ajudando "
-            "ou só atrasando entregas sem reduzir risco."
+        rec = _mk(
+            "cfr", "info", "recommendation",
+            "Cautela vs. velocidade: vale conversar com o time",
+            "Vale conversar com o time: a cautela está ajudando ou só atrasando entregas? "
+            "Às vezes investir em mais testes automáticos é melhor que reduzir a frequência de deploy.",
+            {},
+            related=[ins.id],
         )
+        events.extend([ins, rec])
 
-    return diag, rec
+    return events

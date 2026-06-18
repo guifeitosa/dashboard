@@ -231,11 +231,17 @@ def main():
     )
 
     # ── Diagnóstico & Recomendação ────────────────────────────────────────────
-    diag_items, rec_items = build_aging_diagnostics(
+    _ag_period = today_date.strftime("%Y-%m")
+    _ag_team_label = selected_team  # already computed
+    _ag_events = build_aging_diagnostics(
         df, team_arg, type_arg,
         today=today_date,
         prev_aging=prev_aging,
+        team_label=_ag_team_label,
+        period=_ag_period,
     )
+    diag_items = [e.description for e in _ag_events if e.layer in ("insight", "diagnostic")]
+    rec_items  = [e.description for e in _ag_events if e.layer == "recommendation"]
     _section_label("Diagnóstico &amp; Recomendação")
     if not diag_items:
         st.markdown(

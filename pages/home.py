@@ -1,4 +1,5 @@
 import calendar
+import datetime
 import re
 
 import pandas as pd
@@ -253,7 +254,103 @@ def main():
         )
     st.html(opp_html)
 
-    # ── 3. Alertas ────────────────────────────────────────────────────────────
+    # ── 3. Diagnósticos e Recomendações (Insight Engine) ─────────────────────
+    _section_label("Diagnósticos e Recomendações")
+
+    try:
+        _transitions_df = pd.read_sql(
+            "SELECT issue_key, from_status, to_status, changed_at FROM issue_transitions",
+            engine,
+            parse_dates=["changed_at"],
+        )
+        _snap_df = pd.read_sql(
+            "SELECT period, team, metric_name, value FROM metric_snapshots", engine
+        )
+        # Pivot snapshots to list of dicts: [{period, team, metric_name: value, ...}]
+        _prev_snaps: list[dict] = []
+        for (_p, _t), _grp in _snap_df.groupby(["period", "team"]):
+            _row: dict = {"period": _p, "team": _t}
+            for _, _r in _grp.iterrows():
+                _row[_r["metric_name"]] = _r["value"]
+            _prev_snaps.append(_row)
+
+        from insights import InsightEngine
+        _engine = InsightEngine()
+        _issues_raw = pd.read_sql("SELECT * FROM issues_raw", engine)
+        # current period = latest year_month in data
+        _current_period = df["year_month"].max() if "year_month" in df.columns else datetime.date.today().strftime("%Y-%m")
+        _all_events = _engine.run(
+            team=team_arg,
+            period=str(_current_period),
+            df_issues=_issues_raw,
+            df_transitions=_transitions_df,
+            prev_snapshots=_prev_snaps,
+        )
+
+        # Find high/critical insight events; deduplicate by bottleneck_status
+        _raw_insights = [e for e in _all_events if e.layer == "insight" and e.severity in ("critical", "high")]
+        _seen_bk: set = set()
+        _high_insights = []
+        for _e in _raw_insights:
+            _bk = _e.evidence.get("bottleneck_status")
+            if _bk:
+                if _bk in _seen_bk:
+                    continue
+                _seen_bk.add(_bk)
+            _high_insights.append(_e)
+
+        if not _high_insights:
+            st.markdown(
+                '<span style="font-size:13px;color:#94a3b8;">Nenhum insight crítico identificado no período.</span>',
+                unsafe_allow_html=True,
+            )
+        else:
+            for _ins in _high_insights:
+                # Find diagnostic linked to this insight
+                _diag = next(
+                    (e for e in _all_events if e.layer == "diagnostic" and _ins.id in e.related_ids),
+                    None,
+                )
+                # Find recommendation: through diagnostic if exists, else directly from insight
+                if _diag is not None:
+                    _rec = next(
+                        (e for e in _all_events if e.layer == "recommendation" and _diag.id in e.related_ids),
+                        None,
+                    )
+                else:
+                    _rec = next(
+                        (e for e in _all_events if e.layer == "recommendation" and _ins.id in e.related_ids),
+                        None,
+                    )
+
+                # Render chain — always expanded, no collapse
+                _sev_color = {"critical": "#dc2626", "high": "#ca8a04"}.get(_ins.severity, "#64748b")
+                _chain_html = (
+                    f'<div style="background:white;border-radius:12px;padding:16px 20px;'
+                    f'box-shadow:0 1px 4px rgba(0,0,0,0.07);border-left:4px solid {_sev_color};'
+                    f'margin-bottom:10px;font-family:{_FONT};">'
+                    f'<div style="font-size:14px;font-weight:700;color:{_sev_color};margin-bottom:8px;">'
+                    f'⚠ {_ins.title}</div>'
+                    f'<div style="font-size:13px;color:#374151;margin-bottom:6px;">{_ins.description}</div>'
+                )
+                if _diag is not None:
+                    _chain_html += (
+                        f'<div style="font-size:12px;color:#64748b;margin-bottom:5px;padding-top:6px;'
+                        f'border-top:1px solid #f1f5f9;">'
+                        f'💡 <strong>O que está acontecendo:</strong> {_diag.description}</div>'
+                    )
+                if _rec is not None:
+                    _chain_html += (
+                        f'<div style="font-size:12px;color:#15803d;">'
+                        f'✅ <strong>O que você pode fazer:</strong> {_rec.description}</div>'
+                    )
+                _chain_html += '</div>'
+                st.html(_chain_html)
+
+    except Exception as _exc:
+        st.caption(f"Diagnósticos indisponíveis: {_exc}")
+
+    # ── 4. Alertas ────────────────────────────────────────────────────────────
     _section_label("Alertas")
 
     alerts: list[tuple[str, str]] = []

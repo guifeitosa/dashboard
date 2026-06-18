@@ -552,9 +552,13 @@ def main():
             st.markdown(f"- {b}")
 
     # ── Diagnóstico & Recomendação ────────────────────────────────────────────
-    diag_items, rec_items = build_throughput_diagnostics(
-        closed_list, df, team_arg, pred
+    _period = selected_end  # already computed
+    _tp_team_label = selected_team  # already computed
+    _tp_events = build_throughput_diagnostics(
+        closed_list, df, team_arg, pred, team_label=_tp_team_label, period=_period
     )
+    diag_items = [e.description for e in _tp_events if e.layer in ("insight", "diagnostic")]
+    rec_items  = [e.description for e in _tp_events if e.layer == "recommendation"]
 
     st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
     st.markdown(

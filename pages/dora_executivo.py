@@ -395,7 +395,12 @@ def main():
     _prev_dict = ({k: _sf(_prev_row.get(k)) for k in _DORA_KEYS}
                   if _prev_row is not None else None)
 
-    _dora_diag, _dora_rec = build_dora_diagnostics(_cur_dict, _prev_dict)
+    _dora_events = build_dora_diagnostics(
+        _cur_dict, _prev_dict,
+        team_label=selected_team, period=current_month,
+    )
+    _dora_diag = [e.description for e in _dora_events if e.layer in ("insight", "diagnostic")]
+    _dora_rec  = [e.description for e in _dora_events if e.layer == "recommendation"]
 
     st.markdown("<div style='margin-top:24px;'></div>", unsafe_allow_html=True)
     st.markdown(

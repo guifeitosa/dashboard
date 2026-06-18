@@ -76,20 +76,22 @@ def _closed_list(*counts) -> list[dict]:
 
 class TestRule1AgingTP:
     def test_fires_good_tp_up_aging_ok(self):
-        """TP last > TP prev AND pct_critical < 20% → 'resolvidos mais rápido'."""
+        """TP last > TP prev AND pct_critical < 20% → positive insight."""
         # 2 closed months: 5 → 8 (up)
         cl = _closed_list(5, 8)
         # Open items all very recent → 0% critical
         df = _df([_open("Em Andamento", created_days_ago=2) for _ in range(5)])
 
-        diag, rec = build_throughput_diagnostics(cl, df, None, _pred("Alta"), today=_TODAY)
+        events = build_throughput_diagnostics(cl, df, None, _pred("Alta"), today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
         assert len(diag) == 1
-        assert "resolvidos mais rápido" in diag[0]
+        assert "mais que os" in diag[0]
         assert "regularidade" in rec[0]
 
     def test_fires_bad_tp_down_aging_bad(self):
-        """TP last < TP prev AND pct_critical > 30% → 'demorando mais'."""
+        """TP last < TP prev AND pct_critical > 30% → negative insight."""
         cl = _closed_list(10, 3)
         # 4 out of 5 open items older than 30 days → pct_crit = 80%
         df = _df(
@@ -97,10 +99,12 @@ class TestRule1AgingTP:
             + [_open("Em Andamento", created_days_ago=2)]
         )
 
-        diag, rec = build_throughput_diagnostics(cl, df, None, _pred("Alta"), today=_TODAY)
+        events = build_throughput_diagnostics(cl, df, None, _pred("Alta"), today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
         assert len(diag) == 1
-        assert "demorando mais" in diag[0]
+        assert "menos que os" in diag[0]
         assert "itens mais antigos" in rec[0]
 
     def test_does_not_fire_tp_up_but_aging_bad(self):
@@ -108,7 +112,8 @@ class TestRule1AgingTP:
         cl = _closed_list(3, 8)
         df = _df([_open("Em Andamento", created_days_ago=45) for _ in range(5)])
 
-        diag, _ = build_throughput_diagnostics(cl, df, None, _pred("Alta"), today=_TODAY)
+        events = build_throughput_diagnostics(cl, df, None, _pred("Alta"), today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert diag == []
 
@@ -117,7 +122,8 @@ class TestRule1AgingTP:
         cl = _closed_list(10, 2)
         df = _df([_open("Em Andamento", created_days_ago=2) for _ in range(5)])
 
-        diag, _ = build_throughput_diagnostics(cl, df, None, _pred("Alta"), today=_TODAY)
+        events = build_throughput_diagnostics(cl, df, None, _pred("Alta"), today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert diag == []
 
@@ -126,7 +132,8 @@ class TestRule1AgingTP:
         cl = _closed_list(7)
         df = _df([_open("Em Andamento", created_days_ago=2)])
 
-        diag, _ = build_throughput_diagnostics(cl, df, None, _pred("Alta"), today=_TODAY)
+        events = build_throughput_diagnostics(cl, df, None, _pred("Alta"), today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert diag == []
 
@@ -140,12 +147,13 @@ class TestRule1AgingTP:
             + [_open("Em Andamento", created_days_ago=2, team="Time Beta")]
         )
 
-        diag, _ = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             cl, df, "Time Beta", _pred("Alta"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert len(diag) == 1
-        assert "resolvidos mais rápido" in diag[0]
+        assert "mais que os" in diag[0]
 
 
 # ── Rule 2: Gargalo ───────────────────────────────────────────────────────────
@@ -164,9 +172,11 @@ class TestRule2Bottleneck:
         """10 items in bottleneck vs 1+1 → ratio = 10/4 = 2.5 > 2.0."""
         df = self._bottleneck_df("Em Revisão", 10)
 
-        diag, rec = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             [], df, None, _pred("Alta"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
         assert len(diag) == 1
         assert "Em Revisão" in diag[0]
@@ -176,9 +186,11 @@ class TestRule2Bottleneck:
         """The exact bottleneck status name must be present in both diag and rec."""
         df = self._bottleneck_df("Aguardando Aprovação", 12)
 
-        diag, rec = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             [], df, None, _pred("Alta"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
         assert "Aguardando Aprovação" in diag[0]
         assert "Aguardando Aprovação" in rec[0]
@@ -191,9 +203,10 @@ class TestRule2Bottleneck:
             + [_open("A Fazer",  5) for _ in range(3)]
         )
 
-        diag, _ = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             [], df, None, _pred("Alta"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert diag == []
 
@@ -201,9 +214,10 @@ class TestRule2Bottleneck:
         """Only 1 non-terminal status → can't compute a meaningful ratio."""
         df = _df([_open("Em Andamento", 5) for _ in range(10)])
 
-        diag, _ = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             [], df, None, _pred("Alta"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert diag == []
 
@@ -215,9 +229,10 @@ class TestRule2Bottleneck:
             + [_open("A Fazer", 5) for _ in range(2)]
         )
 
-        diag, _ = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             [], df, None, _pred("Alta"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         # "Fazendo" vs "A Fazer": ratio = 3 / mean(3, 2) = 3 / 2.5 = 1.2 < 2.0 → no fire
         assert diag == []
@@ -234,9 +249,10 @@ class TestRule2Bottleneck:
             + [_open("Fazendo",    5, team="Time Alfa") for _ in range(2)]
         )
 
-        diag, _ = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             [], df, "Time Beta", _pred("Alta"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert len(diag) == 1
         assert "Em Revisão" in diag[0]
@@ -246,31 +262,35 @@ class TestRule2Bottleneck:
 
 class TestRule3Predictability:
     def test_fires_when_label_is_baixa(self):
-        """pred['label'] == 'Baixa' → 'variado bastante' appears in diag."""
+        """pred['label'] == 'Baixa' → 'variando muito' appears in diag."""
         df = _df([_open("Em Andamento", 5)])
 
-        diag, rec = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             [], df, None, _pred("Baixa"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
-        assert any("variado bastante" in d for d in diag)
-        assert any("instável" in r for r in rec)
+        assert any("variando muito" in d for d in diag)
+        assert any("oscila" in r for r in rec)
 
     def test_does_not_fire_when_label_is_alta(self):
         df = _df([_open("Em Andamento", 5)])
 
-        diag, _ = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             [], df, None, _pred("Alta"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert diag == []
 
     def test_does_not_fire_when_label_is_media(self):
         df = _df([_open("Em Andamento", 5)])
 
-        diag, _ = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             [], df, None, _pred("Média"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert diag == []
 
@@ -285,9 +305,10 @@ class TestRule3Predictability:
         assert pred["label"] == "Baixa"
 
         df = _df([_open("Em Andamento", 5)])
-        diag, _ = build_throughput_diagnostics([], df, None, pred, today=_TODAY)
+        events = build_throughput_diagnostics([], df, None, pred, today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
-        assert any("variado bastante" in d for d in diag)
+        assert any("variando muito" in d for d in diag)
 
 
 # ── No rule fires ─────────────────────────────────────────────────────────────
@@ -303,9 +324,11 @@ class TestNoRuleFires:
             + [_open("A Fazer",  5) for _ in range(3)]
         )
 
-        diag, rec = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             cl, df, None, _pred("Alta"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
         assert diag == []
         assert rec == []
@@ -315,15 +338,17 @@ class TestNoRuleFires:
         pred Alta → rule 3 silent."""
         df = _df([_closed() for _ in range(5)])
 
-        diag, rec = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             [], df, None, _pred("Alta"), today=_TODAY
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
         assert diag == []
         assert rec == []
 
     def test_diag_and_rec_always_same_length(self):
-        """Every fired rule appends to both lists → lengths must always be equal."""
+        """Every fired rule emits paired insight+recommendation → lengths must always be equal."""
         # Fire all three rules at once
         cl = _closed_list(5, 8)
         df = _df(
@@ -332,9 +357,11 @@ class TestNoRuleFires:
             + [_open("A Fazer",  5)]
         )
 
-        diag, rec = build_throughput_diagnostics(
+        events = build_throughput_diagnostics(
             cl, df, None, _pred("Baixa"), today=_TODAY
         )
+        diag = [e for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e for e in events if e.layer == "recommendation"]
 
         assert len(diag) == len(rec)
         assert len(diag) >= 1

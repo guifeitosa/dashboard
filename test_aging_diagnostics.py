@@ -134,7 +134,9 @@ class TestRule1Gargalo:
             + [_open("Fazendo",  5)]
             + [_open("A Fazer",  5)]
         )
-        diag, rec = build_aging_diagnostics(df, None, None, today=_TODAY)
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
         assert len(diag) == 1
         assert "Em Revisão" in diag[0]
@@ -147,7 +149,8 @@ class TestRule1Gargalo:
             + [_open("Fazendo",  5)]
             + [_open("A Fazer",  5)]
         )
-        diag, _ = build_aging_diagnostics(df, None, None, today=_TODAY)
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
         assert "represando as entregas" not in diag[0]
 
     def test_respects_team_filter(self):
@@ -159,11 +162,13 @@ class TestRule1Gargalo:
             + [_open("A Fazer",    5, team="Time Alfa") for _ in range(2)]
         )
         # With team="Time Beta" → bottleneck fires
-        diag_b, _ = build_aging_diagnostics(df, "Time Beta", None, today=_TODAY)
+        events_b = build_aging_diagnostics(df, "Time Beta", None, today=_TODAY)
+        diag_b = [e.description for e in events_b if e.layer in ("insight", "diagnostic")]
         assert any("Em Revisão" in d for d in diag_b)
 
         # With team="Time Alfa" → balanced, no bottleneck
-        diag_a, _ = build_aging_diagnostics(df, "Time Alfa", None, today=_TODAY)
+        events_a = build_aging_diagnostics(df, "Time Alfa", None, today=_TODAY)
+        diag_a = [e.description for e in events_a if e.layer in ("insight", "diagnostic")]
         assert not any("Em Revisão" in d for d in diag_a)
 
     def test_respects_issuetype_filter(self):
@@ -174,10 +179,12 @@ class TestRule1Gargalo:
             + [_open("Em Revisão",   5, issuetype="História") for _ in range(2)]
             + [_open("Em Andamento", 5, issuetype="História") for _ in range(2)]
         )
-        diag_bug, _ = build_aging_diagnostics(df, None, "Bug", today=_TODAY)
+        events_bug = build_aging_diagnostics(df, None, "Bug", today=_TODAY)
+        diag_bug = [e.description for e in events_bug if e.layer in ("insight", "diagnostic")]
         assert any("Em Revisão" in d for d in diag_bug)
 
-        diag_hist, _ = build_aging_diagnostics(df, None, "História", today=_TODAY)
+        events_hist = build_aging_diagnostics(df, None, "História", today=_TODAY)
+        diag_hist = [e.description for e in events_hist if e.layer in ("insight", "diagnostic")]
         assert not any("Em Revisão" in d for d in diag_hist)
 
 
@@ -189,39 +196,44 @@ class TestRule2Tendencia:
         return _df([_open("Em Andamento", avg_days) for _ in range(total)])
 
     def test_fires_worsened_when_avg_age_increased(self):
-        """avg_age went from 5 to 15 days (+10) → 'demorando mais'."""
+        """avg_age went from 5 to 15 days (+10) → 'mais tempo' in diag."""
         df = self._df_with_age(15)
         prev = _prev(avg_age=5.0, pct_crit=0.0)
 
-        diag, rec = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=prev
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
-        assert any("demorando mais" in d for d in diag)
+        assert any("mais tempo" in d for d in diag)
         assert any("mais antigos" in r for r in rec)
 
     def test_fires_worsened_when_pct_crit_increased(self):
-        """pct_crit jumped from 5% to 40% → 'demorando mais'."""
+        """pct_crit jumped from 5% to 40% → 'mais tempo' in diag."""
         df = _df(
             [_open("Em Andamento", created_days_ago=45) for _ in range(4)]
             + [_open("Em Andamento", created_days_ago=2)  for _ in range(6)]
         )
         prev = _prev(avg_age=2.0, pct_crit=0.05)
 
-        diag, rec = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=prev
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
-        assert any("demorando mais" in d for d in diag)
+        assert any("mais tempo" in d for d in diag)
 
     def test_fires_improved_when_avg_age_decreased(self):
         """avg_age went from 20 to 5 days (-15) → 'mais rápido'."""
         df = self._df_with_age(5)
         prev = _prev(avg_age=20.0, pct_crit=0.0)
 
-        diag, rec = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=prev
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
         assert any("mais rápido" in d for d in diag)
         assert any("priorizando" in r for r in rec)
@@ -230,7 +242,8 @@ class TestRule2Tendencia:
         """No prev_aging → rule must be silently skipped."""
         df = self._df_with_age(15)
 
-        diag, _ = build_aging_diagnostics(df, None, None, today=_TODAY, prev_aging=None)
+        events = build_aging_diagnostics(df, None, None, today=_TODAY, prev_aging=None)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert not any("demorando mais" in d for d in diag)
         assert not any("mais rápido" in d for d in diag)
@@ -240,9 +253,10 @@ class TestRule2Tendencia:
         df = self._df_with_age(5)
         bad_prev = _prev(avg_age=-28.0)
 
-        diag, _ = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=bad_prev
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert not any("demorando mais" in d or "mais rápido" in d for d in diag)
 
@@ -251,9 +265,10 @@ class TestRule2Tendencia:
         df = self._df_with_age(6)
         prev = _prev(avg_age=5.5, pct_crit=0.0)
 
-        diag, _ = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=prev
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert not any("demorando mais" in d or "mais rápido" in d for d in diag)
 
@@ -267,10 +282,12 @@ class TestRule3SemMovimentacao:
             [_open("Em Andamento", 5, updated_days_ago=20) for _ in range(3)]
             + [_open("Em Andamento", 5, updated_days_ago=3)  for _ in range(2)]
         )
-        diag, rec = build_aging_diagnostics(df, None, None, today=_TODAY)
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
-        assert any("atualização recente" in d for d in diag)
-        assert any("replanejados" in r for r in rec)
+        assert any("14 dias" in d for d in diag)
+        assert any("prioridade" in r for r in rec)
 
     def test_does_not_fire_when_below_threshold(self):
         """1 out of 10 items without update = 10% < 20% → no fire."""
@@ -278,7 +295,8 @@ class TestRule3SemMovimentacao:
             [_open("Em Andamento", 5, updated_days_ago=20)]
             + [_open("Em Andamento", 5, updated_days_ago=3) for _ in range(9)]
         )
-        diag, _ = build_aging_diagnostics(df, None, None, today=_TODAY)
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert not any("atualização recente" in d for d in diag)
 
@@ -291,7 +309,8 @@ class TestRule3SemMovimentacao:
         df = pd.DataFrame(rows)
         df["created"] = pd.to_datetime(df["created"])
 
-        diag, _ = build_aging_diagnostics(df, None, None, today=_TODAY)
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert not any("atualização recente" in d for d in diag)
 
@@ -301,7 +320,8 @@ class TestRule3SemMovimentacao:
             [_open("Em Andamento", 5, updated_days_ago=20) for _ in range(2)]
             + [_open("Em Andamento", 5, updated_days_ago=3)  for _ in range(8)]
         )
-        diag, _ = build_aging_diagnostics(df, None, None, today=_TODAY)
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert not any("atualização recente" in d for d in diag)
 
@@ -328,11 +348,12 @@ class TestRule2Enriched:
         df = self._bottleneck_df(15)
         prev = _prev(avg_age=3.0, pct_crit=0.0)
 
-        diag, rec = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=prev
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
-        rule2_diag = [d for d in diag if "demorando mais" in d]
+        rule2_diag = [d for d in diag if "mais tempo" in d]
         assert len(rule2_diag) == 1
         assert "Em Revisão" in rule2_diag[0], (
             f"Expected bottleneck status in Rule 2 text, got: {rule2_diag[0]!r}"
@@ -347,14 +368,15 @@ class TestRule2Enriched:
         )
         prev = _prev(avg_age=3.0, pct_crit=0.0)
 
-        diag, _ = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=prev
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
-        rule2_diag = [d for d in diag if "demorando mais" in d]
+        rule2_diag = [d for d in diag if "mais tempo" in d]
         assert len(rule2_diag) == 1
         assert "Em Revisão" not in rule2_diag[0]
-        assert "do que no período anterior" in rule2_diag[0]
+        assert "mês passado" in rule2_diag[0]
 
     def test_improved_with_high_pct_crit_is_qualified(self):
         """Rule 2 improved BUT pct_crit > 50% → message is qualified ('ainda é crítica')."""
@@ -366,14 +388,16 @@ class TestRule2Enriched:
         # prev avg_age was worse (higher) and pct_crit was higher → "improved"
         prev = _prev(avg_age=50.0, pct_crit=0.90)
 
-        diag, rec = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=prev
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
-        rule2_diag = [d for d in diag if "mais rápido" in d]
+        rule2_diag = [d for d in diag if "mais da metade" in d]
         assert len(rule2_diag) == 1
-        assert "ainda é crítica" in rule2_diag[0]
-        assert "mais da metade" in rec[diag.index(rule2_diag[0])]
+        assert "mês passado" in rule2_diag[0]
+        assert "mais antigos" in rec[diag.index(rule2_diag[0])]
 
     def test_improved_with_low_pct_crit_is_plain(self):
         """Rule 2 improved and pct_crit ≤ 50% → plain 'mais rápido' without qualifier."""
@@ -384,9 +408,11 @@ class TestRule2Enriched:
         )
         prev = _prev(avg_age=20.0, pct_crit=0.80)
 
-        diag, rec = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=prev
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
         rule2_diag = [d for d in diag if "mais rápido" in d]
         assert len(rule2_diag) == 1
@@ -406,11 +432,13 @@ class TestRule2SnapshotFormat:
         df = _df([_open("Em Andamento", 15) for _ in range(10)])
         snap_prev = {"avg_age": 3.0, "pct_critical": 0.0, "total_open": 10}
 
-        diag, rec = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=snap_prev
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
-        assert any("demorando mais" in d for d in diag)
+        assert any("mais tempo" in d for d in diag)
         assert any("mais antigos" in r for r in rec)
 
     def test_fires_improved_with_snapshot_dict(self):
@@ -418,9 +446,10 @@ class TestRule2SnapshotFormat:
         df = _df([_open("Em Andamento", 2) for _ in range(10)])
         snap_prev = {"avg_age": 20.0, "pct_critical": 0.30, "total_open": 10}
 
-        diag, rec = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=snap_prev
         )
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
 
         assert any("mais rápido" in d for d in diag)
 
@@ -435,7 +464,9 @@ class TestNoRuleFires:
             + [_open("Fazendo",   5, updated_days_ago=3) for _ in range(3)]
             + [_open("A Fazer",   5, updated_days_ago=3) for _ in range(3)]
         )
-        diag, rec = build_aging_diagnostics(df, None, None, today=_TODAY)
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
         assert diag == []
         assert rec == []
@@ -443,7 +474,9 @@ class TestNoRuleFires:
     def test_empty_with_no_open_items(self):
         df = _df([_closed() for _ in range(5)])
 
-        diag, rec = build_aging_diagnostics(df, None, None, today=_TODAY)
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        diag = [e.description for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e.description for e in events if e.layer == "recommendation"]
 
         assert diag == []
         assert rec == []
@@ -460,9 +493,11 @@ class TestNoRuleFires:
         )
         prev = _prev(avg_age=1.0, pct_crit=0.0)
 
-        diag, rec = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=prev
         )
+        diag = [e for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e for e in events if e.layer == "recommendation"]
 
         assert len(diag) == len(rec)
         assert len(diag) >= 2  # at least bottleneck + sem_movimento
@@ -472,8 +507,10 @@ class TestNoRuleFires:
         df = _df([_open("Em Andamento", 5, updated_days_ago=20) for _ in range(10)])
         prev = _prev(avg_age=1.0)
 
-        diag, rec = build_aging_diagnostics(
+        events = build_aging_diagnostics(
             df, None, None, today=_TODAY, prev_aging=prev
         )
+        diag = [e for e in events if e.layer in ("insight", "diagnostic")]
+        rec  = [e for e in events if e.layer == "recommendation"]
 
         assert len(diag) == len(rec)
