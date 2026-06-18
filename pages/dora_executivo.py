@@ -3,11 +3,10 @@ import calendar
 import pandas as pd
 import streamlit as st
 
-from loader import load_jira_issues_from_csv
+from core_metrics import dora_band, prepare_df
+from db import engine
 from metrics import aggregate_metrics_by_month, calculate_metrics_summary
 from squad_health import render_squad_health
-
-DATA_PATH = "data/jira_issues_synthetic.csv"
 
 MONTH_PT = {
     "01": "JAN", "02": "FEV", "03": "MAR", "04": "ABR",
@@ -81,25 +80,19 @@ LEVEL_BG = {
 COLS = "2.3fr 0.9fr 1.1fr 0.7fr 0.7fr 0.7fr 1.1fr 1.15fr 1fr"
 
 
+@st.cache_data(ttl=300)
+def _load_issues() -> pd.DataFrame:
+    df = pd.read_sql("SELECT * FROM issues_raw", engine)
+    return prepare_df(df)
+
+
 def _miss(v) -> bool:
     return v is None or (isinstance(v, float) and pd.isna(v))
 
 
 def classify(key: str, v) -> tuple[str, str]:
-    if _miss(v):
-        return "N/A", LEVEL_COLOR["N/A"]
-    v = float(v)
-    if key == "lead_time_days":
-        lvl = "Elite" if v < 1 else "High" if v <= 7 else "Medium" if v <= 30 else "Low"
-    elif key == "deploy_freq_interval":
-        lvl = "Elite" if v <= 1 else "High" if v <= 5 else "Medium" if v <= 20 else "Low"
-    elif key == "mttr_hours":
-        lvl = "Elite" if v < 1 else "High" if v < 24 else "Medium" if v < 168 else "Low"
-    elif key == "cfr_percent":
-        lvl = "Elite" if v <= 15 else "High" if v <= 30 else "Medium" if v <= 45 else "Low"
-    else:
-        return "N/A", LEVEL_COLOR["N/A"]
-    return lvl, LEVEL_COLOR[lvl]
+    level = dora_band(key, v)
+    return level, LEVEL_COLOR[level]
 
 
 def fmt_val(v, key: str) -> str:
@@ -180,7 +173,7 @@ def main():
     # set_page_config is handled in app.py (navigation entry point)
     render_squad_health()
 
-    df = load_jira_issues_from_csv(DATA_PATH)
+    df = _load_issues()
     summary = calculate_metrics_summary(df)
 
     teams = ["Todos"] + sorted(df["team"].unique().tolist())
@@ -188,8 +181,12 @@ def main():
 
     st.sidebar.title("Filtros")
     selected_team = st.sidebar.selectbox("Time", teams)
-    selected_start = st.sidebar.select_slider("Período inicial", options=months, value=months[0])
-    selected_end = st.sidebar.select_slider("Período final", options=months, value=months[-1])
+    if len(months) > 1:
+        selected_start = st.sidebar.select_slider("Período inicial", options=months, value=months[0])
+        selected_end = st.sidebar.select_slider("Período final", options=months, value=months[-1])
+    else:
+        selected_start = selected_end = months[0]
+        st.sidebar.write(f"Período: {fmt_month(months[0])}")
 
     if selected_start > selected_end:
         st.warning("Período inválido: início deve ser anterior ao fim.")

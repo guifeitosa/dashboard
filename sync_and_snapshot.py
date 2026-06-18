@@ -12,15 +12,15 @@ from datetime import datetime, timezone
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from db import IssueRaw, MetricSnapshot, engine, init_db
-from jira_client import load_issues_as_dataframe
+from db import IssueRaw, IssueTransition, MetricSnapshot, engine, init_db
+from jira_client import load_issues_and_transitions
 from metrics import calculate_metrics_summary
 
 METRIC_COLUMNS = [
     ("mttr", "mttr_hours"),
     ("cfr", "cfr_percent"),
     ("lead_time", "lead_time_days"),
-    ("throughput", "deployment_count"),
+    ("deployment_count", "deployment_count"),
 ]
 
 
@@ -44,6 +44,62 @@ def _to_py_datetime(ts):
     if hasattr(ts, "to_pydatetime"):
         return ts.to_pydatetime()
     return ts
+
+
+def sync_transitions(session: Session, transitions: list[dict]) -> int:
+    """
+    Replace all rows in issue_transitions with the current sync's data.
+
+    Same truncate-and-reinsert strategy as sync_issues_raw: since every
+    sync fetches the FULL changelog for all issues, we always have the
+    complete picture and can safely rebuild from scratch.
+    """
+    session.query(IssueTransition).delete()
+
+    rows = []
+    for t in transitions:
+        raw_ts = t.get("changed_at")
+        if not raw_ts:
+            continue
+        changed_at = pd.to_datetime(raw_ts, utc=True, errors="coerce")
+        if pd.isna(changed_at):
+            continue
+        # Strip timezone so SQLite/SQLAlchemy stores a naive datetime
+        changed_at_naive = changed_at.tz_convert(None).to_pydatetime()
+        rows.append(IssueTransition(
+            issue_key=t["issue_key"],
+            from_status=t.get("from_status"),
+            to_status=t.get("to_status"),
+            changed_at=changed_at_naive,
+            team=t.get("team"),
+        ))
+
+    session.bulk_save_objects(rows)
+    return len(rows)
+
+
+def print_transitions(session: Session, limit: int = 20) -> None:
+    rows = (
+        session.query(IssueTransition)
+        .order_by(IssueTransition.changed_at.desc())
+        .limit(limit)
+        .all()
+    )
+    total = session.query(IssueTransition).count()
+
+    width = 88
+    print("\n" + "=" * width)
+    print(f"  issue_transitions  ({total} rows total — showing {len(rows)} most recent)")
+    print("=" * width)
+    print(f"{'issue_key':<14} {'team':<18} {'from_status':<22} {'to_status':<22} changed_at")
+    print("-" * width)
+    for r in rows:
+        ts = r.changed_at.strftime("%Y-%m-%d %H:%M") if r.changed_at else ""
+        print(
+            f"{(r.issue_key or ''):<14} {(r.team or ''):<18} "
+            f"{(r.from_status or ''):<22} {(r.to_status or ''):<22} {ts}"
+        )
+    print("=" * width)
 
 
 def sync_issues_raw(session: Session, df: pd.DataFrame) -> int:
@@ -179,16 +235,21 @@ def main():
     init_db()
     print("[OK] Database schema ready (metrics.db)")
 
-    # 2. Fetch from Jira
-    print("[..] Fetching issues from Jira...")
-    jira_df = load_issues_as_dataframe()
-    print(f"[OK] {len(jira_df)} issues fetched from Jira")
+    # 2. Fetch from Jira (issues + changelogs in a single batch)
+    print("[..] Fetching issues + changelogs from Jira (expand=changelog)...")
+    jira_df, transitions = load_issues_and_transitions()
+    print(f"[OK] {len(jira_df)} issues fetched, {len(transitions)} status transitions extracted")
 
     with Session(engine) as session:
         # 3. Sync issues_raw (truncate + re-insert)
         issues_count = sync_issues_raw(session, jira_df)
         session.commit()
         print(f"[OK] issues_raw synced: {issues_count} rows written")
+
+        # 3b. Sync issue_transitions (truncate + re-insert)
+        t_count = sync_transitions(session, transitions)
+        session.commit()
+        print(f"[OK] issue_transitions synced: {t_count} rows written")
 
         # 4. Reload from DB (single source of truth for metrics)
         df = load_issues_from_db(session)
@@ -229,8 +290,9 @@ def main():
         print(f"  Rows updated    : {counts['updated']}")
         print(f"  Rows skipped    : {counts['skipped']}  (already finalized, use --force-recalculate-period to override)")
 
-        # 9. Print full metric_snapshots for validation
+        # 9. Print metric_snapshots + transition sample for validation
         print_snapshots(session)
+        print_transitions(session)
 
 
 if __name__ == "__main__":

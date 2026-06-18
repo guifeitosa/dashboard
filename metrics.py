@@ -24,7 +24,7 @@ def calculate_cfr(df: pd.DataFrame) -> pd.DataFrame:
     incidents = incidents.rename(columns={"key": "incidente_count"})
 
     gmud_deploys = df[df["issuetype"] == "GMUD"].copy()
-    gmud_deploys["deploy_date"] = gmud_deploys["data_implantacao"].fillna(gmud_deploys["resolutiondate"])
+    gmud_deploys["deploy_date"] = gmud_deploys["data_implantacao"]
     gmud_deploys = gmud_deploys[gmud_deploys["deploy_date"].notna()]
     gmud_deploys["deploy_month"] = pd.to_datetime(gmud_deploys["deploy_date"]).dt.to_period("M").astype(str)
     gmud_deploys = gmud_deploys.groupby(["team", "deploy_month"], as_index=False)["key"].count()
@@ -66,7 +66,7 @@ def calculate_lead_time_for_changes(df: pd.DataFrame) -> pd.DataFrame:
 def calculate_deployment_frequency(df: pd.DataFrame) -> pd.DataFrame:
     df = _ensure_group_columns(df)
     deployments = df[df["issuetype"] == "GMUD"].copy()
-    deployments["deployment_date"] = deployments["data_implantacao"].fillna(deployments["resolutiondate"])
+    deployments["deployment_date"] = deployments["data_implantacao"]
     deployments = deployments[deployments["deployment_date"].notna()]
     deployments["deployment_month"] = pd.to_datetime(deployments["deployment_date"]).dt.to_period("M").astype(str)
     result = deployments.groupby(["team", "deployment_month"], as_index=False)["key"].count()

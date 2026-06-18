@@ -41,10 +41,11 @@ home       = st.Page("pages/home.py",          title="Home",        icon="🏠",
 dora_exec  = st.Page("pages/dora_executivo.py", title="Executivo",   icon="📊")
 throughput = st.Page("pages/throughput.py",     title="Throughput",  icon="📈")
 aging      = st.Page("pages/aging.py",          title=aging_title,   icon="⏳")
+fluxo      = st.Page("pages/fluxo.py",          title="Fluxo",       icon="🌊")
 
 pg = st.navigation({
     "Visão Geral":       [home],
     "DORA Metrics":      [dora_exec],
-    "Fluxo de Trabalho": [throughput, aging],
+    "Fluxo de Trabalho": [throughput, aging, fluxo],
 })
 pg.run()

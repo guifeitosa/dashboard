@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, UniqueConstraint, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Float, Index, Integer, String, UniqueConstraint, create_engine
 from sqlalchemy.orm import declarative_base
 
 DATABASE_URL = "sqlite:///metrics.db"
@@ -31,6 +31,26 @@ class MetricSnapshot(Base):
 
     __table_args__ = (
         UniqueConstraint("period", "team", "metric_name", name="uq_period_team_metric"),
+    )
+
+
+class IssueTransition(Base):
+    """One row per status change extracted from the Jira changelog."""
+    __tablename__ = "issue_transitions"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    issue_key = Column(String, nullable=False)
+    from_status = Column(String)
+    to_status = Column(String)
+    changed_at = Column(DateTime, nullable=False)
+    team = Column(String)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "issue_key", "from_status", "to_status", "changed_at",
+            name="uq_issue_transition",
+        ),
+        Index("ix_transitions_issue_key", "issue_key"),
+        Index("ix_transitions_team_changed_at", "team", "changed_at"),
     )
 
 
