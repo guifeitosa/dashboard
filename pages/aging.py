@@ -4,12 +4,25 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from loader import load_jira_issues_from_csv
+from core_metrics import compute_aging, prepare_df
+from db import engine
 from squad_health import render_squad_health
 
-DATA_PATH = "data/jira_issues_synthetic.csv"
-
 OVER_REP_THRESHOLD = 15  # pp
+
+BAND_DISPLAY = [
+    ("0–7d",   "0–7 dias",   "#15803d"),
+    ("7–14d",  "7–14 dias",  "#ca8a04"),
+    ("14–30d", "14–30 dias", "#ca8a04"),
+    ("30–60d", "30–60 dias", "#dc2626"),
+    ("60+d",   "60+ dias",   "#991b1b"),
+]
+
+
+@st.cache_data(ttl=300)
+def _load_issues() -> pd.DataFrame:
+    df = pd.read_sql("SELECT * FROM issues_raw", engine)
+    return prepare_df(df)
 
 
 def _row_color(row: pd.Series) -> list[str]:
@@ -51,14 +64,12 @@ def _section_label(text: str) -> None:
 def main():
     render_squad_health()
 
-    df = load_jira_issues_from_csv(DATA_PATH)
-    has_updated = "updated" in df.columns and df["updated"].notna().any()
+    df = _load_issues()
 
+    # Open issues for filter dropdowns and the detail table
     open_issues = df[~df["is_resolved"]].copy()
-    today = pd.Timestamp(datetime.date.today())
-    open_issues["dias_parado"] = (today - open_issues["created"]).dt.days
-    if has_updated:
-        open_issues["dias_sem_update"] = (today - open_issues["updated"]).dt.days
+    today_ts = pd.Timestamp(datetime.date.today())
+    open_issues["dias_parado"] = (today_ts - open_issues["created"]).dt.days
 
     st.sidebar.title("Filtros")
     selected_team = st.sidebar.selectbox(
@@ -70,12 +81,12 @@ def main():
         ["Todos"] + sorted(open_issues["issuetype"].dropna().unique().tolist()),
     )
 
+    # Filtered open issues — used only for the detail table
     filt = open_issues.copy()
     if selected_team != "Todos":
         filt = filt[filt["team"] == selected_team]
     if selected_type != "Todos":
         filt = filt[filt["issuetype"] == selected_type]
-
     filt = filt.sort_values("dias_parado", ascending=False)
 
     # ── Page title ────────────────────────────────────────────────────────────
@@ -92,14 +103,21 @@ def main():
         st.info("Nenhum item em aberto para o filtro selecionado.")
         return
 
-    # ── KPI cards ─────────────────────────────────────────────────────────────
-    total_open = len(filt)
-    avg_age = filt["dias_parado"].mean()
-    over7 = int((filt["dias_parado"] >= 7).sum())
-    over30 = int((filt["dias_parado"] > 30).sum())
+    # ── Core calculation via core_metrics ────────────────────────────────────
+    team_arg = selected_team if selected_team != "Todos" else None
+    type_arg = selected_type if selected_type != "Todos" else None
+    aging = compute_aging(df, team=team_arg, issuetype=type_arg)
 
-    if has_updated and "dias_sem_update" in filt.columns:
-        sem_mov = int((filt["dias_sem_update"] > 14).sum())
+    total_open = aging["total_open"]
+    avg_age    = aging["avg_age"]
+    bands      = aging["bands"]
+    sem_mov    = aging["sem_movimento"]
+
+    over7  = bands["7–14d"] + bands["14–30d"] + bands["30–60d"] + bands["60+d"]
+    over30 = bands["30–60d"] + bands["60+d"]
+
+    # ── KPI cards ─────────────────────────────────────────────────────────────
+    if sem_mov is not None:
         sem_mov_pct = sem_mov / total_open * 100 if total_open else 0
         sem_mov_sub = f"{sem_mov_pct:.0f}% dos itens abertos"
         sem_mov_color = (
@@ -109,8 +127,8 @@ def main():
         )
         sem_mov_val = str(sem_mov)
     else:
-        sem_mov_val = "—"
-        sem_mov_sub = "campo 'updated' indisponível"
+        sem_mov_val   = "—"
+        sem_mov_sub   = "campo 'updated' indisponível"
         sem_mov_color = "#94a3b8"
 
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -130,13 +148,9 @@ def main():
     # ── Histograma por faixa de dias ──────────────────────────────────────────
     _section_label("Distribuição por Faixa de Tempo")
 
-    d = filt["dias_parado"]
     band_rows = [
-        {"faixa": "0–7 dias",   "count": int((d < 7).sum()),                         "color": "#15803d"},
-        {"faixa": "7–14 dias",  "count": int(((d >= 7)  & (d < 14)).sum()),          "color": "#ca8a04"},
-        {"faixa": "14–30 dias", "count": int(((d >= 14) & (d <= 30)).sum()),         "color": "#ca8a04"},
-        {"faixa": "30–60 dias", "count": int(((d > 30)  & (d <= 60)).sum()),         "color": "#dc2626"},
-        {"faixa": "60+ dias",   "count": int((d > 60).sum()),                         "color": "#991b1b"},
+        {"faixa": label, "count": bands[key], "color": color}
+        for key, label, color in BAND_DISPLAY
     ]
     hist_df = pd.DataFrame(band_rows)
     band_order = [r["faixa"] for r in band_rows]
@@ -192,10 +206,10 @@ def main():
     table = filt[["key", "issuetype", "team", "created", "dias_parado"]].copy()
     table["created"] = table["created"].dt.strftime("%d/%m/%Y")
     table = table.rename(columns={
-        "key": "Chave",
-        "issuetype": "Tipo",
-        "team": "Time",
-        "created": "Criado em",
+        "key":         "Chave",
+        "issuetype":   "Tipo",
+        "team":        "Time",
+        "created":     "Criado em",
         "dias_parado": "Dias em Aberto",
     })
     styled = table.style.apply(_row_color, axis=1)
@@ -206,41 +220,21 @@ def main():
     )
 
     # ── Diagnóstico: sobre-representação na faixa crítica (> 30 dias) ─────────
-    red = filt[filt["dias_parado"] > 30]
-    if red.empty or total_open == 0:
+    diagnosis = aging["diagnosis"]
+    if not diagnosis:
+        if over30 > 0:
+            _section_label("Diagnóstico — Fatores sobre-representados na faixa crítica (> 30 dias)")
+            st.markdown(
+                '<div style="font-size:13px;color:#64748b;">'
+                'Nenhum Tipo ou Time com sobre-representação relevante (≥ 15 p.p.) na faixa crítica.'
+                '</div>',
+                unsafe_allow_html=True,
+            )
         return
 
     _section_label("Diagnóstico — Fatores sobre-representados na faixa crítica (> 30 dias)")
-
-    factors = []
-    for dim, col in [("Tipo", "issuetype"), ("Time", "team")]:
-        for val in filt[col].dropna().unique():
-            n_total = int((filt[col] == val).sum())
-            n_red   = int((red[col] == val).sum())
-            pct_total = n_total / total_open * 100
-            pct_red   = n_red   / len(red)   * 100
-            over_rep  = pct_red - pct_total
-            if over_rep >= OVER_REP_THRESHOLD and n_red >= 1:
-                factors.append({
-                    "dim": dim,
-                    "val": val,
-                    "n_red": n_red,
-                    "pct_red": pct_red,
-                    "pct_total": pct_total,
-                    "over_rep": over_rep,
-                })
-
-    if not factors:
-        st.markdown(
-            '<div style="font-size:13px;color:#64748b;">'
-            'Nenhum Tipo ou Time com sobre-representação relevante (≥ 15 p.p.) na faixa crítica.'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-        return
-
-    factors.sort(key=lambda f: f["over_rep"], reverse=True)
-    for f in factors:
+    diagnosis_sorted = sorted(diagnosis, key=lambda f: f["over_rep"], reverse=True)
+    for f in diagnosis_sorted:
         n_label = f"{f['n_red']} {'item' if f['n_red'] == 1 else 'itens'}"
         st.markdown(
             f"- **{f['dim']}: {f['val']}** — "

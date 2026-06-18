@@ -1,9 +1,7 @@
-import datetime
-
-import pandas as pd
 import streamlit as st
 
-from loader import load_jira_issues_from_csv
+from core_metrics import compute_aging, prepare_df
+from db import engine
 
 st.set_page_config(
     page_title="Engine Metrics",
@@ -24,14 +22,14 @@ section[data-testid="stSidebar"] > div { background: white; }
 )
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=300)
 def _aging_critical_count() -> int:
-    """Items open for more than 30 days (same criterion as the Aging page)."""
-    df = load_jira_issues_from_csv("data/jira_issues_synthetic.csv")
-    open_issues = df[~df["is_resolved"]].copy()
-    today = pd.Timestamp(datetime.date.today())
-    open_issues["dias_parado"] = (today - open_issues["created"]).dt.days
-    return int((open_issues["dias_parado"] > 30).sum())
+    """Items open for more than 30 days — mirrors compute_aging's '>30d' band."""
+    import pandas as pd
+    df = pd.read_sql("SELECT * FROM issues_raw", engine)
+    df = prepare_df(df)
+    aging = compute_aging(df)
+    return aging["bands"]["30–60d"] + aging["bands"]["60+d"]
 
 
 critical = _aging_critical_count()
