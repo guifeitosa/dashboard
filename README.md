@@ -120,7 +120,6 @@ Gera dados sintéticos com proporções realistas de tipos e times.
 ├── jira_client.py                    # Cliente da API REST do Jira
 ├── db.py                             # Modelos SQLAlchemy (SQLite → Postgres-ready)
 ├── sync_and_snapshot.py              # Pipeline de snapshot (CLI)
-├── loader.py                         # Carrega e normaliza CSV (modo offline)
 ├── generate_synthetic_jira_node.js   # Gerador de dados sintéticos (Node.js)
 ├── requirements.txt
 ├── pages/
@@ -129,8 +128,6 @@ Gera dados sintéticos com proporções realistas de tipos e times.
 │   ├── throughput.py                 # Throughput mensal com WIP exclusion
 │   ├── aging.py                      # Aging — itens em aberto por tempo
 │   └── fluxo.py                      # Fluxo — tempo por status e diagnóstico de gargalo
-├── data/
-│   └── jira_issues_synthetic.csv     # Dataset sintético para desenvolvimento
 ├── scripts/
 │   └── inspect_db.py                 # Utilitário: inspeciona metrics.db no terminal
 ├── scripts/legacy/                   # Scripts de fase anterior (não fazem parte do app)
