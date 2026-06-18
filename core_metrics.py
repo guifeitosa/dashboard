@@ -722,7 +722,14 @@ def squad_health_score(
     transitions_df is accepted for future extensibility; it is not yet used in
     the scoring calculation.
 
-    Falls back to 50 for any metric with no data in the window.
+    Missing-data policy per metric:
+      Lead Time, MTTR : fall back to 50 (neutral) when the window has no data.
+      CFR             : EXCLUDED from scoring when cfr_val is None (no GMUDs
+                        with data_implantacao in the window).  Its 15% weight is
+                        redistributed proportionally among the other 4 metrics.
+                        See the inline comment in the implementation for the full
+                        rationale.  cfr_excluded=True is returned in the dict so
+                        the UI can label the CFR chip as "Sem dados".
 
     Returns
     -------

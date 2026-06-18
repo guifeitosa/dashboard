@@ -4,16 +4,17 @@ Aplicação Streamlit para acompanhamento contínuo de métricas DORA e de fluxo
 
 ## Visão geral
 
-O dashboard consolida quatro métricas DORA (Lead Time, Deployment Frequency, MTTR, CFR) e duas métricas de fluxo (Throughput, Aging) em um score único chamado **Squad Health**. Cada página oferece detalhes, tendências e diagnósticos automáticos gerados a partir dos dados reais — sem números fixos no código.
+O dashboard consolida quatro métricas DORA (Lead Time, Deployment Frequency, MTTR, CFR) e métricas de fluxo (Throughput, Aging, tempo por status) em um score único chamado **Squad Health**. Cada página oferece detalhes, tendências e diagnósticos automáticos gerados a partir dos dados reais — sem números fixos no código.
 
 ## Páginas
 
 | Página | Descrição |
 |---|---|
 | **Home** | Visão consolidada: Squad Health, resumo de cada página, maior oportunidade de melhoria e alertas ativos |
-| **DORA Executivo** | Tabela detalhada das 4 métricas DORA por mês, faixas Elite/High/Medium/Low, histórico e sparklines |
+| **DORA Executivo** | Tabela detalhada das 4 métricas DORA por mês, faixas Elite/High/Medium/Low e sparklines |
 | **Throughput** | Entregas mensais com exclusão do mês em andamento (WIP), tendência, previsibilidade (CV) e diagnóstico de queda |
 | **Aging** | Itens em aberto por tempo de criação, histograma por faixa, KPI de itens sem movimentação e diagnóstico de sobre-representação |
+| **Fluxo** | Tempo médio/mediano por status do workflow, volume por status e diagnóstico de gargalo com limiar relativo |
 
 ## Arquitetura
 
@@ -21,22 +22,26 @@ O dashboard consolida quatro métricas DORA (Lead Time, Deployment Frequency, MT
 Jira API
    │
    ▼
-jira_client.py          ← normaliza issues do Jira
+jira_client.py              ← normaliza issues do Jira
    │
-   ├──► loader.py       ← carrega CSV local (modo offline / dados sintéticos)
-   │
-   └──► sync_and_snapshot.py + db.py   ← pipeline de snapshot para SQLite
-                                          (tabelas metric_snapshots e issues_raw)
-                                          └► metrics.db
+   └──► sync_and_snapshot.py + db.py
+           │  ├── issues_raw         ← issues brutas
+           │  ├── issue_transitions  ← histórico de mudança de status
+           │  └── metric_snapshots   ← snapshots DORA por período/time
+           └── metrics.db
 
 app.py  (entry point Streamlit)
    ├── pages/home.py
    ├── pages/dora_executivo.py
    ├── pages/throughput.py
-   └── pages/aging.py
-         ├── squad_health.py   ← Squad Health Score (cálculo + card visual compartilhado)
-         ├── metrics.py        ← funções de cálculo DORA
-         └── loader.py
+   ├── pages/aging.py
+   └── pages/fluxo.py
+         │
+         ├── core_metrics.py   ← camada central de cálculo (DORA, Throughput,
+         │                        Aging, Scoring, Squad Health)
+         ├── status_time.py    ← tempo por status a partir de transições
+         ├── squad_health.py   ← card visual do Squad Health (delega a core_metrics)
+         └── metrics.py        ← cálculos DORA legados (calculate_metrics_summary)
 ```
 
 ## Setup
@@ -67,30 +72,32 @@ JIRA_API_TOKEN=seu_token_aqui
 ```
 
 > O token é gerado em **Jira → Configurações de conta → Segurança → Criar e gerenciar tokens de API**.
->
-> Sem `.env`, o app funciona no modo offline com `data/jira_issues_synthetic.csv`.
 
-### 3. Rodar o dashboard
-
-```bash
-streamlit run app.py
-```
-
-Abre em `http://localhost:8501`. A página inicial (Home) carrega automaticamente.
-
-### 4. Sincronizar dados do Jira (pipeline de snapshot)
+### 3. Sincronizar dados do Jira
 
 ```bash
 python sync_and_snapshot.py
 ```
 
-Sincroniza issues do Jira para `metrics.db` e grava snapshots de métricas por período. Períodos passados ficam imutáveis (`finalized=True`); o período corrente é recalculado a cada execução.
+O que este comando faz:
+- Busca issues na API do Jira e normaliza via `jira_client.py`
+- Sincroniza o histórico de transições de status (`issue_transitions`) — necessário para a página Fluxo
+- Atribui times automaticamente via round-robin quando o campo `Team` está vazio
+- Grava snapshots de métricas DORA por período em `metric_snapshots`
 
-Para forçar o recálculo de um período já finalizado:
+Para forçar recálculo de um período já finalizado:
 
 ```bash
 python sync_and_snapshot.py --force-recalculate-period=2026-05
 ```
+
+### 4. Rodar o dashboard
+
+```bash
+streamlit run app.py
+```
+
+Abre em `http://localhost:8501`.
 
 ### 5. Dados sintéticos (desenvolvimento offline)
 
@@ -100,43 +107,45 @@ Para regenerar o dataset de desenvolvimento:
 node generate_synthetic_jira_node.js
 ```
 
-Gera `data/jira_issues_synthetic.csv` com ~600 issues nos últimos 6 meses.
+Gera dados sintéticos com proporções realistas de tipos e times.
 
 ## Estrutura de arquivos
 
 ```
 ├── app.py                            # Entry point Streamlit (navegação, CSS global)
-├── loader.py                         # Carrega e normaliza CSV
-├── metrics.py                        # Cálculos DORA: MTTR, CFR, Lead Time, Deploy Freq
+├── core_metrics.py                   # Camada central: DORA, Throughput, Aging, Scoring, Squad Health
+├── status_time.py                    # Tempo por status a partir de histórico de transições
 ├── squad_health.py                   # Squad Health Score + card visual reutilizável
+├── metrics.py                        # Cálculos DORA legados (calculate_metrics_summary)
 ├── jira_client.py                    # Cliente da API REST do Jira
 ├── db.py                             # Modelos SQLAlchemy (SQLite → Postgres-ready)
 ├── sync_and_snapshot.py              # Pipeline de snapshot (CLI)
-├── test_snapshots.py                 # Testes pytest do pipeline de snapshot
+├── loader.py                         # Carrega e normaliza CSV (modo offline)
 ├── generate_synthetic_jira_node.js   # Gerador de dados sintéticos (Node.js)
 ├── requirements.txt
 ├── pages/
 │   ├── home.py                       # Visão Geral consolidada
 │   ├── dora_executivo.py             # DORA Metrics — visão executiva
 │   ├── throughput.py                 # Throughput mensal com WIP exclusion
-│   └── aging.py                      # Aging — itens em aberto por tempo
+│   ├── aging.py                      # Aging — itens em aberto por tempo
+│   └── fluxo.py                      # Fluxo — tempo por status e diagnóstico de gargalo
 ├── data/
 │   └── jira_issues_synthetic.csv     # Dataset sintético para desenvolvimento
 ├── scripts/
 │   └── inspect_db.py                 # Utilitário: inspeciona metrics.db no terminal
 ├── scripts/legacy/                   # Scripts de fase anterior (não fazem parte do app)
 └── docs/
-    └── metricas.md                   # Fórmulas, faixas DORA, Squad Health, glossário
+    └── metricas.md                   # Fórmulas, funções, Squad Health, limitações e glossário
 ```
 
 ## Testes
 
 ```bash
-pytest test_snapshots.py -v
+pytest test_core_metrics.py test_snapshots.py test_status_time.py test_transitions.py -v
 ```
 
-Cobre: inserção, idempotência, imutabilidade de períodos finalizados, flag `--force-recalculate-period` e sincronização de issues brutas.
+Cobre: cálculos de core_metrics, pipeline de snapshot (inserção, idempotência, imutabilidade, `--force-recalculate-period`), status_time e transições.
 
 ## Documentação técnica
 
-Fórmulas completas, faixas DORA, cálculo do Squad Health, limitações e glossário em [docs/metricas.md](docs/metricas.md).
+Fórmulas completas, funções de `core_metrics.py` organizadas por grupo, `TERMINAL_STATUSES`, metodologia de gargalo, status de migração e limitações do ambiente de teste em [docs/metricas.md](docs/metricas.md).
