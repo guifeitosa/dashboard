@@ -15,6 +15,7 @@ import pytest
 
 from core_metrics import (
     AGING_OVER_REP_THRESHOLD,
+    TERMINAL_STATUSES,
     _score_lower_better,
     compute_aging,
     compute_predictability,
@@ -34,6 +35,7 @@ from core_metrics import (
     squad_health_score,
     worst_dora_band,
 )
+from metrics import calculate_cfr, calculate_deployment_frequency
 
 # ── Reference date used for all age calculations ─────────────────────────────
 _REF_DATE = datetime.datetime(2026, 6, 1)
@@ -705,14 +707,172 @@ class TestSquadHealthScore:
                 "key": "PROJ-0002",
                 "issuetype": "GMUD",
                 "team": "Time Alfa",
-                "status": "Feito",
+                "status": "Implantado com Sucesso",
                 "created": datetime.datetime(2026, 6, 1),
                 "resolutiondate": datetime.datetime(2026, 6, 5),
-                "data_implantacao": datetime.datetime(2026, 6, 5),
-                "updated": None,
+                "data_implantacao": None,
+                "updated": datetime.datetime(2026, 6, 5),
             },
         ]
         df = pd.DataFrame(rows)
         result = squad_health_score(df)
         # Jun has no LT or MTTR → must be skipped; current_dora_month must fall back to May
         assert result["current_dora_month"] == "2026-05"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestTerminalStatuses
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestTerminalStatuses:
+    def test_implantado_com_sucesso_is_terminal(self):
+        assert "implantado com sucesso" in TERMINAL_STATUSES
+
+    def test_implantado_com_falha_is_terminal(self):
+        assert "implantado com falha" in TERMINAL_STATUSES
+
+    def test_concluido_still_present(self):
+        assert "concluído" in TERMINAL_STATUSES
+
+    def test_feito_still_present(self):
+        assert "feito" in TERMINAL_STATUSES
+
+
+# ── Helpers for GMUD-based CFR/deployment tests ───────────────────────────────
+
+def _gmud_row(status: str, year_month: str, team: str = "Time Alfa") -> dict:
+    """Build a minimal GMUD row. Sets resolutiondate only for terminal statuses."""
+    y, m = int(year_month[:4]), int(year_month[5:7])
+    created = datetime.datetime(y, m, 1)
+    is_terminal = status.lower() in {"implantado com sucesso", "implantado com falha"}
+    res = datetime.datetime(y, m, 15) if is_terminal else None
+    return {
+        "issuetype": "GMUD",
+        "team": team,
+        "status": status,
+        "created": created,
+        "resolutiondate": res,
+        "data_implantacao": None,
+        "updated": res or created,
+    }
+
+
+def _gmud_df(rows: list[dict]) -> pd.DataFrame:
+    """Build a GMUD DataFrame ready for calculate_cfr / calculate_deployment_frequency."""
+    return prepare_df(_issues(rows))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestCalculateCfr
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCalculateCfr:
+    def test_cfr_zero_when_all_success(self):
+        df = _gmud_df([
+            _gmud_row("Implantado com Sucesso", "2026-01"),
+            _gmud_row("Implantado com Sucesso", "2026-01"),
+            _gmud_row("Implantado com Sucesso", "2026-01"),
+        ])
+        result = calculate_cfr(df)
+        row = result[result["year_month"] == "2026-01"].iloc[0]
+        assert row["cfr_percent"] == 0.0
+        assert row["gmud_deploy_count"] == 3
+        assert row["gmud_fail_count"] == 0
+
+    def test_cfr_100_when_all_fail(self):
+        df = _gmud_df([
+            _gmud_row("Implantado com Falha", "2026-02"),
+            _gmud_row("Implantado com Falha", "2026-02"),
+        ])
+        result = calculate_cfr(df)
+        row = result[result["year_month"] == "2026-02"].iloc[0]
+        assert row["cfr_percent"] == 100.0
+        assert row["gmud_deploy_count"] == 2
+        assert row["gmud_fail_count"] == 2
+
+    def test_cfr_partial_failure(self):
+        df = _gmud_df([
+            _gmud_row("Implantado com Sucesso", "2026-03"),
+            _gmud_row("Implantado com Sucesso", "2026-03"),
+            _gmud_row("Implantado com Sucesso", "2026-03"),
+            _gmud_row("Implantado com Falha", "2026-03"),
+        ])
+        result = calculate_cfr(df)
+        row = result[result["year_month"] == "2026-03"].iloc[0]
+        assert abs(row["cfr_percent"] - 25.0) < 0.001
+        assert row["gmud_deploy_count"] == 4
+        assert row["gmud_fail_count"] == 1
+
+    def test_cfr_ignores_non_terminal_gmuds(self):
+        df = _gmud_df([
+            _gmud_row("Implantado com Sucesso", "2026-04"),
+            _gmud_row("Feito", "2026-04"),
+            _gmud_row("Em Andamento", "2026-04"),
+        ])
+        result = calculate_cfr(df)
+        row = result[result["year_month"] == "2026-04"].iloc[0]
+        assert row["gmud_deploy_count"] == 1
+        assert row["cfr_percent"] == 0.0
+
+    def test_cfr_empty_when_no_terminal_gmuds(self):
+        df = _gmud_df([_gmud_row("Em Andamento", "2026-05")])
+        assert calculate_cfr(df).empty
+
+    def test_cfr_ignores_non_gmud_issuetypes(self):
+        """Histórias with terminal-like status do not count as deploys."""
+        df = _issues([
+            {"issuetype": "História", "created": _d(10), "resolutiondate": _d(5),
+             "status": "Implantado com Sucesso", "data_implantacao": None, "updated": _d(5)},
+            {"issuetype": "GMUD", "created": _d(10), "resolutiondate": _d(5),
+             "status": "Implantado com Sucesso", "data_implantacao": None, "updated": _d(5)},
+        ])
+        df = prepare_df(df)
+        result = calculate_cfr(df)
+        assert result["gmud_deploy_count"].sum() == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestCalculateDeploymentFrequency
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestCalculateDeploymentFrequency:
+    def test_counts_both_success_and_failure(self):
+        df = _gmud_df([
+            _gmud_row("Implantado com Sucesso", "2026-01"),
+            _gmud_row("Implantado com Falha", "2026-01"),
+            _gmud_row("Implantado com Sucesso", "2026-01"),
+        ])
+        result = calculate_deployment_frequency(df)
+        row = result[result["year_month"] == "2026-01"].iloc[0]
+        assert row["deployment_count"] == 3
+
+    def test_excludes_non_terminal_gmuds(self):
+        df = _gmud_df([
+            _gmud_row("Implantado com Sucesso", "2026-02"),
+            _gmud_row("Aguardando Implantação", "2026-02"),
+        ])
+        result = calculate_deployment_frequency(df)
+        row = result[result["year_month"] == "2026-02"].iloc[0]
+        assert row["deployment_count"] == 1
+
+    def test_groups_by_resolutiondate_month(self):
+        """GMUD created in Jan but resolved in Feb counts in Feb."""
+        rows = [{
+            "issuetype": "GMUD",
+            "team": "Time Alfa",
+            "status": "Implantado com Sucesso",
+            "created": datetime.datetime(2026, 1, 15),
+            "resolutiondate": datetime.datetime(2026, 2, 1),
+            "data_implantacao": None,
+            "updated": datetime.datetime(2026, 2, 1),
+        }]
+        df = prepare_df(_issues(rows))
+        result = calculate_deployment_frequency(df)
+        assert "2026-02" in result["year_month"].values
+        row = result[result["year_month"] == "2026-02"].iloc[0]
+        assert row["deployment_count"] == 1
+        assert result[result["year_month"] == "2026-01"].empty
+
+    def test_returns_empty_when_no_terminal_gmuds(self):
+        df = _gmud_df([_gmud_row("Em Andamento", "2026-03")])
+        assert calculate_deployment_frequency(df).empty

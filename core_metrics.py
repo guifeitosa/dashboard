@@ -50,6 +50,7 @@ _LEVEL_RANK = {"Elite": 0, "High": 1, "Medium": 2, "Low": 3, "N/A": 99}
 TERMINAL_STATUSES: frozenset[str] = frozenset({
     "feito", "concluído", "concluido", "done", "fechado", "closed",
     "resolvido", "resolved", "completo", "completed",
+    "implantado com sucesso", "implantado com falha",
 })
 
 

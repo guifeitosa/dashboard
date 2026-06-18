@@ -76,8 +76,24 @@ HISTORIA_OPEN_RANGE = list(range(1, len(HISTORIA_FLOW) - 2))
 SUBTASK_FLOW = ["Sprint Backlog", "Em desenvolvimento", "Code Review", "Concluído"]
 SUBTASK_DONE = "Concluído"
 
-# Simple flow for support types (GMUDs, Incidentes)
-STATUS_DONE = "Feito"
+# GMUD deployment flow — terminal is "Implantado com Sucesso" (or "Implantado com Falha" on failure)
+GMUD_FLOW = [
+    "Sprint Backlog",
+    "Aguardando Implantação",
+    "Em Validação",
+    "Aguardando Solicitante",
+    "Implantado com Sucesso",
+]
+GMUD_FAIL_STATUS = "Implantado com Falha"
+
+# Incidente flow
+INCIDENTE_FLOW = [
+    "Sprint Backlog",
+    "Em Desenvolvimento",
+    "Em Validação",
+    "Pronto pra Prod",
+    "Concluído",
+]
 
 # Month boundaries: last 7 complete months + current month
 def _month_start(offset: int) -> datetime.date:
@@ -148,7 +164,7 @@ def _make_transitions(
 def _make_gmud(
     team: str,
     month_start: datetime.date,
-    cfr_risky: bool,
+    failure_prob: float,
 ) -> tuple[dict, list[dict]]:
     key = _next_key()
     created_day = random.randint(1, 20)
@@ -160,20 +176,24 @@ def _make_gmud(
     implant_dt = _rand_dt(implant_date)
     resolution_dt = implant_dt + datetime.timedelta(hours=random.randint(1, 4))
 
+    is_failure = random.random() < failure_prob
+    final_status = GMUD_FAIL_STATUS if is_failure else GMUD_FLOW[-1]
+    flow = GMUD_FLOW[:-1] + [final_status]
+
     issue = {
         "key": key,
         "issuetype": "GMUD",
         "team": team,
         "parent_key": None,
-        "status": STATUS_DONE,
+        "status": final_status,
         "created": created,
         "resolutiondate": resolution_dt,
-        "data_implantacao": implant_dt,
+        "data_implantacao": None,
         "updated": resolution_dt,
     }
     transitions = _make_transitions(
         key, team, created,
-        statuses=["A Fazer", "Em Andamento", STATUS_DONE],
+        statuses=flow,
         resolution_dt=resolution_dt,
     )
     return issue, transitions
@@ -194,7 +214,7 @@ def _make_incidente(
         "issuetype": "Incidente",
         "team": team,
         "parent_key": None,
-        "status": STATUS_DONE,
+        "status": INCIDENTE_FLOW[-1],
         "created": created,
         "resolutiondate": res_dt,
         "data_implantacao": None,
@@ -202,7 +222,7 @@ def _make_incidente(
     }
     transitions = _make_transitions(
         key, team, created,
-        statuses=["Em Andamento", STATUS_DONE],
+        statuses=INCIDENTE_FLOW,
         resolution_dt=res_dt,
     )
     return issue, transitions
@@ -309,7 +329,9 @@ def _plan_month(month_idx: int, month_start: datetime.date):
     """Return list of (issue_dict, [transition_dict, ...]) for one month."""
     results: list[tuple[dict, list[dict]]] = []
 
-    cfr_risky = month_idx in (1, 3, 5)
+    # Bad months have 25-35% GMUD failure rate; good months 10-15%.
+    is_bad_month = month_idx in (1, 3, 5)
+    failure_prob = 0.30 if is_bad_month else 0.12
     is_aging_bad_month = (month_idx == 2)
     is_current_month = (month_start == MONTHS[-1])
     is_recent = month_idx >= 4  # 3 most recent months get diagnostic scenarios
@@ -318,10 +340,10 @@ def _plan_month(month_idx: int, month_start: datetime.date):
         # ── GMUDs ──────────────────────────────────────────────────────────────
         n_gmuds = random.randint(4, 7)
         for _ in range(n_gmuds):
-            results.append(_make_gmud(team, month_start, cfr_risky))
+            results.append(_make_gmud(team, month_start, failure_prob))
 
-        # ── Incidentes ─────────────────────────────────────────────────────────
-        if cfr_risky:
+        # ── Incidentes — MTTR varies; CFR is now GMUD-driven, not incident-driven
+        if is_bad_month:
             n_incidents = random.randint(2, 3)
             mttr_base = random.uniform(6, 18)
         else:
