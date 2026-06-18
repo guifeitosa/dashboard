@@ -176,11 +176,10 @@ def main():
     df = _load_issues()
     summary = calculate_metrics_summary(df)
 
-    teams = ["Todos"] + sorted(df["team"].unique().tolist())
     months = sorted(summary["year_month"].unique().tolist())
 
+    selected_team = st.session_state.get("global_team", "Todos")
     st.sidebar.title("Filtros")
-    selected_team = st.sidebar.selectbox("Time", teams)
     if len(months) > 1:
         selected_start = st.sidebar.select_slider("Período inicial", options=months, value=months[0])
         selected_end = st.sidebar.select_slider("Período final", options=months, value=months[-1])

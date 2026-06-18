@@ -1,3 +1,4 @@
+import pandas as pd
 import streamlit as st
 
 from core_metrics import compute_aging, prepare_df
@@ -25,16 +26,36 @@ section[data-testid="stSidebar"] > div { background: white; }
 
 
 @st.cache_data(ttl=300)
-def _aging_critical_count() -> int:
+def _get_teams() -> list[str]:
+    try:
+        teams = pd.read_sql(
+            "SELECT DISTINCT team FROM issues_raw WHERE team IS NOT NULL ORDER BY team",
+            engine,
+        )["team"].tolist()
+    except Exception:
+        teams = []
+    return ["Todos"] + teams
+
+
+@st.cache_data(ttl=300)
+def _aging_critical_count(team: str | None = None) -> int:
     """Items open for more than 30 days — mirrors compute_aging's '>30d' band."""
     import pandas as pd
     df = pd.read_sql("SELECT * FROM issues_raw", engine)
     df = prepare_df(df)
-    aging = compute_aging(df)
+    aging = compute_aging(df, team=team)
     return aging["bands"]["30–60d"] + aging["bands"]["60+d"]
 
 
-critical = _aging_critical_count()
+_teams = _get_teams()
+if "global_team" not in st.session_state:
+    st.session_state["global_team"] = "Todos"
+with st.sidebar:
+    st.selectbox("Time", options=_teams, key="global_team")
+
+_selected = st.session_state.get("global_team", "Todos")
+_team_arg = None if _selected == "Todos" else _selected
+critical = _aging_critical_count(team=_team_arg)
 aging_title = f"Aging 🔴 {critical}" if critical > 0 else "Aging"
 
 home       = st.Page("pages/home.py",          title="Home",        icon="🏠", default=True)

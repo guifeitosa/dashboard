@@ -198,24 +198,23 @@ def main():
     resolved = df[df["is_resolved"]].copy()
     resolved["res_month"] = resolved["resolutiondate"].dt.to_period("M").astype(str)
 
-    teams = ["Todos"] + sorted(df["team"].dropna().unique().tolist())
     months = sorted(resolved["res_month"].dropna().unique().tolist())
 
     if not months:
         st.error("Sem itens resolvidos para exibir.")
         return
 
-    # ── Top-bar filters ──────────────────────────────────────────────────────
-    fc1, fc2, fc3, _ = st.columns([1.5, 1.8, 1.8, 5])
+    selected_team = st.session_state.get("global_team", "Todos")
+
+    # ── Top-bar filters (period only — team comes from global sidebar) ───────
+    fc1, fc2, _ = st.columns([1.8, 1.8, 5])
     with fc1:
-        selected_team = st.selectbox("Time", teams)
-    with fc2:
         if len(months) > 1:
             selected_start = st.select_slider("De", options=months, value=months[0])
         else:
             selected_start = months[0]
             st.caption(f"De: {fmt_month(months[0])}")
-    with fc3:
+    with fc2:
         if len(months) > 1:
             selected_end = st.select_slider("Até", options=months, value=months[-1])
         else:

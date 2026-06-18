@@ -72,11 +72,8 @@ def main():
     today_ts = pd.Timestamp(datetime.date.today())
     open_issues["dias_parado"] = (today_ts - open_issues["created"]).dt.days
 
+    selected_team = st.session_state.get("global_team", "Todos")
     st.sidebar.title("Filtros")
-    selected_team = st.sidebar.selectbox(
-        "Time",
-        ["Todos"] + sorted(open_issues["team"].dropna().unique().tolist()),
-    )
     selected_type = st.sidebar.selectbox(
         "Tipo",
         ["Todos"] + sorted(open_issues["issuetype"].dropna().unique().tolist()),

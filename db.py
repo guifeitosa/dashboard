@@ -1,7 +1,10 @@
+import os
+
 from sqlalchemy import Boolean, Column, DateTime, Float, Index, Integer, String, UniqueConstraint, create_engine
 from sqlalchemy.orm import declarative_base
 
-DATABASE_URL = "sqlite:///metrics.db"
+_db_path = os.environ.get("DASHBOARD_DB_PATH", "metrics.db")
+DATABASE_URL = f"sqlite:///{_db_path}"
 engine = create_engine(DATABASE_URL, echo=False)
 Base = declarative_base()
 

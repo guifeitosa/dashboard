@@ -22,9 +22,15 @@ def _load_issues() -> pd.DataFrame:
     return prepare_df(df)
 
 
-def compute_squad_health() -> dict:
-    """Load from SQLite and compute Squad Health Score (all teams, last 3 months)."""
+def compute_squad_health(team: str | None = None) -> dict:
+    """Load from SQLite and compute Squad Health Score (last 3 months).
+
+    team: if given, filters issues to that team before scoring.
+          Pass None (or omit) for the all-teams aggregate.
+    """
     df = _load_issues()
+    if team is not None:
+        df = df[df["team"] == team]
     return squad_health_score(df)
 
 
@@ -57,8 +63,10 @@ def _trend_visual(trend: str) -> tuple[str, str, str]:
 
 
 def render_squad_health() -> None:
-    """Render the Squad Health card. Reusable — call at the top of any page."""
-    h = compute_squad_health()
+    """Render the Squad Health card. Reads global_team from session_state automatically."""
+    _global = st.session_state.get("global_team", "Todos")
+    team_arg = None if _global == "Todos" else _global
+    h = compute_squad_health(team=team_arg)
 
     score = h["score"]
     sc_emoji = _score_emoji(score)

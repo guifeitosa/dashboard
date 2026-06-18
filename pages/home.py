@@ -114,10 +114,13 @@ def main():
     render_squad_health()
 
     # ── Single data load, reused throughout ──────────────────────────────────
-    h = compute_squad_health()
+    _global = st.session_state.get("global_team", "Todos")
+    team_arg = None if _global == "Todos" else _global
+
+    h = compute_squad_health(team=team_arg)
 
     df = prepare_df(pd.read_sql("SELECT * FROM issues_raw", engine))
-    aging = compute_aging(df)
+    aging = compute_aging(df, team=team_arg)
     total_open = aging["total_open"]
     n_red      = aging["bands"]["30–60d"] + aging["bands"]["60+d"]
     pct_red    = n_red / total_open * 100 if total_open > 0 else 0.0
@@ -174,13 +177,21 @@ def main():
 
     aging_color = "#dc2626" if pct_red > 60 else "#ca8a04" if pct_red > 30 else "#15803d"
 
+    def _safe_page_link(path: str, label: str) -> None:
+        # st.page_link requires the navigation context from app.py;
+        # silently skip when the page runs outside that context (e.g. tests).
+        try:
+            st.page_link(path, label=label)
+        except Exception:
+            pass
+
     c1, c2, c3 = st.columns(3)
     with c1:
         st.html(_page_card("📊", "DORA Executivo", worst_band, dora_color, dora_detail))
-        st.page_link("pages/dora_executivo.py", label="Ver Executivo →")
+        _safe_page_link("pages/dora_executivo.py", "Ver Executivo →")
     with c2:
         st.html(_page_card("📈", "Throughput", tp_status, tp_color, tp_detail))
-        st.page_link("pages/throughput.py", label="Ver Throughput →")
+        _safe_page_link("pages/throughput.py", "Ver Throughput →")
     with c3:
         st.html(_page_card(
             "⏳", "Aging",
@@ -188,7 +199,7 @@ def main():
             aging_color,
             f"{n_red} itens ({pct_red:.0f}%) há mais de 30 dias",
         ))
-        st.page_link("pages/aging.py", label="Ver Aging →")
+        _safe_page_link("pages/aging.py", "Ver Aging →")
 
     # ── 2. Maior Oportunidade ─────────────────────────────────────────────────
     _section_label("Maior Oportunidade")

@@ -306,6 +306,94 @@ class TestRule3SemMovimentacao:
         assert not any("atualização recente" in d for d in diag)
 
 
+# ── Rule 2: enriched text (status context + critical sanity check) ────────────
+
+class TestRule2Enriched:
+    """Verify the two new Rule 2 enhancements:
+    1. When Rule 1 also fires, the bottleneck status appears in the Rule 2 text.
+    2. When "improved" but pct_crit > 50%, the message is qualified instead of
+       plain "mais rápido".
+    """
+
+    def _bottleneck_df(self, avg_days: int) -> pd.DataFrame:
+        """10 items stuck in Em Revisão + 1 in each other status → Rule 1 fires."""
+        return _df(
+            [_open("Em Revisão", avg_days) for _ in range(10)]
+            + [_open("Fazendo",  avg_days)]
+            + [_open("A Fazer",  avg_days)]
+        )
+
+    def test_worsened_with_bottleneck_includes_status_name(self):
+        """Rule 2 worsened AND Rule 1 fired → bottleneck status in Rule 2 text."""
+        df = self._bottleneck_df(15)
+        prev = _prev(avg_age=3.0, pct_crit=0.0)
+
+        diag, rec = build_aging_diagnostics(
+            df, None, None, today=_TODAY, prev_aging=prev
+        )
+
+        rule2_diag = [d for d in diag if "demorando mais" in d]
+        assert len(rule2_diag) == 1
+        assert "Em Revisão" in rule2_diag[0], (
+            f"Expected bottleneck status in Rule 2 text, got: {rule2_diag[0]!r}"
+        )
+
+    def test_worsened_without_bottleneck_uses_generic_text(self):
+        """Rule 2 worsened, Rule 1 NOT fired (balanced statuses) → generic text, no status."""
+        df = _df(
+            [_open("Em Revisão", 15) for _ in range(3)]
+            + [_open("Fazendo",  15) for _ in range(3)]
+            + [_open("A Fazer",  15) for _ in range(3)]
+        )
+        prev = _prev(avg_age=3.0, pct_crit=0.0)
+
+        diag, _ = build_aging_diagnostics(
+            df, None, None, today=_TODAY, prev_aging=prev
+        )
+
+        rule2_diag = [d for d in diag if "demorando mais" in d]
+        assert len(rule2_diag) == 1
+        assert "Em Revisão" not in rule2_diag[0]
+        assert "do que no período anterior" in rule2_diag[0]
+
+    def test_improved_with_high_pct_crit_is_qualified(self):
+        """Rule 2 improved BUT pct_crit > 50% → message is qualified ('ainda é crítica')."""
+        # 8 of 10 items are critical (> 30 days) → pct_crit = 80% > 50%
+        df = _df(
+            [_open("Em Andamento", created_days_ago=45) for _ in range(8)]
+            + [_open("Em Andamento", created_days_ago=2)  for _ in range(2)]
+        )
+        # prev avg_age was worse (higher) and pct_crit was higher → "improved"
+        prev = _prev(avg_age=50.0, pct_crit=0.90)
+
+        diag, rec = build_aging_diagnostics(
+            df, None, None, today=_TODAY, prev_aging=prev
+        )
+
+        rule2_diag = [d for d in diag if "mais rápido" in d]
+        assert len(rule2_diag) == 1
+        assert "ainda é crítica" in rule2_diag[0]
+        assert "mais da metade" in rec[diag.index(rule2_diag[0])]
+
+    def test_improved_with_low_pct_crit_is_plain(self):
+        """Rule 2 improved and pct_crit ≤ 50% → plain 'mais rápido' without qualifier."""
+        # 2 of 10 items are critical → pct_crit = 20% < 50%
+        df = _df(
+            [_open("Em Andamento", created_days_ago=45) for _ in range(2)]
+            + [_open("Em Andamento", created_days_ago=2)  for _ in range(8)]
+        )
+        prev = _prev(avg_age=20.0, pct_crit=0.80)
+
+        diag, rec = build_aging_diagnostics(
+            df, None, None, today=_TODAY, prev_aging=prev
+        )
+
+        rule2_diag = [d for d in diag if "mais rápido" in d]
+        assert len(rule2_diag) == 1
+        assert "ainda é crítica" not in rule2_diag[0]
+        assert "priorizando" in rec[diag.index(rule2_diag[0])]
+
+
 # ── Rule 2: snapshot-format prev_aging (pct_critical key, no bands) ───────────
 
 class TestRule2SnapshotFormat:

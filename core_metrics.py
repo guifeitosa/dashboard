@@ -1071,8 +1071,9 @@ def build_throughput_diagnostics(
 # ────────────────────────────────────────────────────────────────────────────
 
 # Minimum change needed to trigger the trend rule (avoids noise on tiny deltas).
-_AGING_TREND_AGE_DELTA  = 1.0   # days
-_AGING_TREND_CRIT_DELTA = 0.02  # fraction (2 pp)
+_AGING_TREND_AGE_DELTA        = 1.0   # days
+_AGING_TREND_CRIT_DELTA       = 0.02  # fraction (2 pp)
+_AGING_STILL_CRITICAL_THRESHOLD = 0.50  # pct_crit above which "improved" gets a caveat
 
 
 def build_aging_diagnostics(
@@ -1154,19 +1155,35 @@ def build_aging_diagnostics(
         )
 
         if worsened:
-            diag.append(
-                "Os itens abertos estão demorando mais para avançar "
-                "do que no período anterior."
-            )
+            if bk is not None:
+                diag.append(
+                    f"Os itens abertos estão demorando mais para avançar, "
+                    f"com concentração maior em **{bk}**."
+                )
+            else:
+                diag.append(
+                    "Os itens abertos estão demorando mais para avançar "
+                    "do que no período anterior."
+                )
             rec.append("Vale revisar os itens mais antigos antes que o atraso aumente.")
         elif improved:
-            diag.append(
-                "Os itens abertos estão sendo resolvidos mais rápido "
-                "que no período anterior."
-            )
-            rec.append(
-                "Continue priorizando a revisão de itens parados — está funcionando."
-            )
+            if pct_crit > _AGING_STILL_CRITICAL_THRESHOLD:
+                diag.append(
+                    "Os itens abertos estão sendo resolvidos mais rápido que no período "
+                    "anterior, mas a situação ainda é crítica — vale manter atenção."
+                )
+                rec.append(
+                    "O ritmo melhorou, mas mais da metade dos itens ainda está há muito "
+                    "tempo em aberto. Continue priorizando a revisão dos mais antigos."
+                )
+            else:
+                diag.append(
+                    "Os itens abertos estão sendo resolvidos mais rápido "
+                    "que no período anterior."
+                )
+                rec.append(
+                    "Continue priorizando a revisão de itens parados — está funcionando."
+                )
 
     # Rule 3: sem movimentação — > 20% of open items with no update in 14 days.
     sem_mov = cur["sem_movimento"]

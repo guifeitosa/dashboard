@@ -7,7 +7,6 @@ Delega todo cálculo a status_time.average_time_in_status / time_in_status.
 
 import datetime
 import os
-import sqlite3
 from collections import defaultdict
 from datetime import timedelta
 
@@ -16,11 +15,9 @@ import pandas as pd
 import streamlit as st
 
 from core_metrics import TERMINAL_STATUSES
+from db import engine as _db_engine
 from squad_health import render_squad_health
 from status_time import average_time_in_status, time_in_status
-
-_HERE = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(_HERE, "..", "metrics.db")
 
 FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif"
 
@@ -71,18 +68,16 @@ def _section_label(text: str) -> None:
 
 @st.cache_data(ttl=300)
 def _load_db() -> tuple[pd.DataFrame, pd.DataFrame]:
-    con = sqlite3.connect(DB_PATH)
     issues = pd.read_sql(
         "SELECT key, issuetype, team, status, created, resolutiondate FROM issues_raw",
-        con,
+        _db_engine,
         parse_dates=["created", "resolutiondate"],
     )
     transitions = pd.read_sql(
         "SELECT issue_key, from_status, to_status, changed_at FROM issue_transitions",
-        con,
+        _db_engine,
         parse_dates=["changed_at"],
     )
-    con.close()
     return issues, transitions
 
 
@@ -166,13 +161,11 @@ def main():
         return
 
     # ── Filters ──────────────────────────────────────────────────────────────
-    teams = ["Todos"] + sorted({r["team"] for r in all_records if r.get("team")})
     types = ["Todos"] + sorted({r["issuetype"] for r in all_records if r.get("issuetype")})
 
-    fc1, fc2, _ = st.columns([1.4, 1.6, 7])
+    sel_team = st.session_state.get("global_team", "Todos")
+    fc1, _ = st.columns([1.6, 7])
     with fc1:
-        sel_team = st.selectbox("Time", teams)
-    with fc2:
         sel_type = st.selectbox("Tipo", types)
 
     team_f = None if sel_team == "Todos" else sel_team
