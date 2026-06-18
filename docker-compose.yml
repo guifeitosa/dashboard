@@ -1,0 +1,34 @@
+services:
+  dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      # metrics.db lives on the host, mounted into the container.
+      # This ensures data persists across image rebuilds and container restarts.
+      - ./metrics.db:/app/metrics.db
+    # Jira credentials injected at runtime — never baked into the image.
+    # For local dev: create a .env file with JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN.
+    # For Kubernetes: replace with a Secret mounted as env vars.
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Run the sync job on demand:
+  #   docker compose run --rm sync
+  # In Kubernetes: deploy as a CronJob with the same image and Jira credentials
+  # from a Secret, sharing the same PersistentVolumeClaim as the dashboard pod.
+  sync:
+    build: .
+    volumes:
+      - ./metrics.db:/app/metrics.db
+    env_file:
+      - .env
+    profiles:
+      - sync
+    command: ["python", "sync_and_snapshot.py"]

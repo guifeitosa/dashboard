@@ -1,7 +1,9 @@
 import streamlit as st
 
 from core_metrics import compute_aging, prepare_df
-from db import engine
+from db import engine, init_db
+
+init_db()
 
 st.set_page_config(
     page_title="Engine Metrics",
