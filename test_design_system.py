@@ -127,7 +127,7 @@ class TestWhyItMattersBulletCounts:
         df = pd.DataFrame([
             {
                 "key": "S-1", "status": "Code Review",
-                "issuetype": "Subtask", "team": "Alpha",
+                "issuetype": "DEV", "team": "Alpha",  # DEV has code review, Subtask no longer does
                 "parent_key": "H-1",
                 "created": pd.Timestamp("2026-01-01"),
                 "resolutiondate": None,

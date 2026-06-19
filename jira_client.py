@@ -263,7 +263,18 @@ def load_issues_and_transitions() -> Tuple[pd.DataFrame, List[Dict]]:
     transitions : list[dict]
         All status-change transitions extracted from changelogs.
     """
-    custom_fields = get_custom_field_ids(["Team", "Data de Implantação"])
+    from config import get_config as _get_config
+    _cfg = _get_config()
+    _jira_fields = _cfg.jira_custom_fields
+    if _jira_fields.get("team") and _jira_fields.get("data_implantacao"):
+        # Use field IDs from config.yaml — skips the Jira API discovery call
+        custom_fields = {
+            "Team": _jira_fields["team"],
+            "Data de Implantação": _jira_fields["data_implantacao"],
+        }
+    else:
+        custom_fields = get_custom_field_ids(["Team", "Data de Implantação"])
+
     fields = (
         ["issuetype", "status", "created", "resolutiondate", "updated", "parent"]
         + list(custom_fields.values())
@@ -271,7 +282,7 @@ def load_issues_and_transitions() -> Tuple[pd.DataFrame, List[Dict]]:
 
     # Phase 1: fetch all issues without changelog (fast, reliable)
     print("    Phase 1/2: fetching issues...", flush=True)
-    issues = fetch_all_issues("project = TD", fields)
+    issues = fetch_all_issues(f"project = {_cfg.jira_project_key}", fields)
 
     normalized: List[Dict] = []
     for issue in issues:

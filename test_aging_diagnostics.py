@@ -632,11 +632,11 @@ class TestRuleAHistoriaProntaMasParada:
 # ── Rule B: Subtask parada em Code Review ────────────────────────────────────
 
 class TestRuleBSubtaskCodeReview:
-    def test_fires_when_stuck_over_5_days(self):
+    def test_fires_for_dev_stuck_over_5_days(self):
         df = _raw_df([
             _open_k("H-001", "Em desenvolvimento", created_days_ago=20),
             _open_k("S-001", "Code Review", created_days_ago=15, updated_days_ago=7,
-                    issuetype="Subtask", parent_key="H-001"),
+                    issuetype="DEV", parent_key="H-001"),
         ])
         events = build_aging_diagnostics(df, None, None, today=_TODAY)
         ins = [e for e in events if e.title == "Itens aguardando revisão de código há dias"]
@@ -644,13 +644,23 @@ class TestRuleBSubtaskCodeReview:
         assert ins[0].evidence["count"] == 1
         assert ins[0].evidence["avg_days_waiting"] == 7.0
 
+    def test_fires_for_bug_dev_stuck_over_5_days(self):
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", created_days_ago=20),
+            _open_k("S-001", "Code Review", created_days_ago=15, updated_days_ago=8,
+                    issuetype="Bug-Dev", parent_key="H-001"),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Itens aguardando revisão de código há dias"]
+        assert len(ins) == 1
+
     def test_silent_when_5_days_or_less(self):
         df = _raw_df([
             _open_k("H-001", "Em desenvolvimento", 20),
             _open_k("S-001", "Code Review", 10, updated_days_ago=4,
-                    issuetype="Subtask", parent_key="H-001"),
+                    issuetype="DEV", parent_key="H-001"),
             _open_k("S-002", "Code Review", 10, updated_days_ago=5,
-                    issuetype="Subtask", parent_key="H-001"),
+                    issuetype="DEV", parent_key="H-001"),
         ])
         events = build_aging_diagnostics(df, None, None, today=_TODAY)
         ins = [e for e in events if e.title == "Itens aguardando revisão de código há dias"]
@@ -677,13 +687,68 @@ class TestRuleBSubtaskCodeReview:
         df = _raw_df([
             _open_k("H-001", "Em desenvolvimento", 20),
             _open_k("S-001", "Code Review", 15, updated_days_ago=7,
-                    issuetype="Subtask", parent_key="H-001"),
+                    issuetype="DEV", parent_key="H-001"),
             _open_k("S-002", "Code Review", 15, updated_days_ago=9,
-                    issuetype="Subtask", parent_key="H-001"),
+                    issuetype="DEV", parent_key="H-001"),
         ])
         events = build_aging_diagnostics(df, None, None, today=_TODAY)
         ins = [e for e in events if e.title == "Itens aguardando revisão de código há dias"]
         assert ins[0].evidence["avg_days_waiting"] == 8.0
+
+
+# ── Rule B: issuetype filter (QA must NOT fire) ───────────────────────────────
+
+class TestRuleBIssuetypeFilter:
+    """QA never passes through Code Review — Rule B must not fire for it,
+    even when stuck in that status past the alert threshold."""
+
+    def test_qa_in_code_review_does_not_fire(self):
+        """QA subtask stuck in Code Review > 5 days → Rule B silent."""
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", 20),
+            _open_k("S-001", "Code Review", 15, updated_days_ago=8,
+                    issuetype="QA", parent_key="H-001"),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Itens aguardando revisão de código há dias"]
+        assert len(ins) == 0, (
+            "Rule B must not fire for QA — QA does not have a code review step"
+        )
+
+    def test_mixed_qa_and_dev_only_dev_triggers(self):
+        """Mix of QA (silent) and DEV (fires) — only DEV counted."""
+        df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", 20),
+            _open_k("S-001", "Code Review", 15, updated_days_ago=7,
+                    issuetype="DEV", parent_key="H-001"),
+            _open_k("S-002", "Code Review", 15, updated_days_ago=9,
+                    issuetype="QA", parent_key="H-001"),
+        ])
+        events = build_aging_diagnostics(df, None, None, today=_TODAY)
+        ins = [e for e in events if e.title == "Itens aguardando revisão de código há dias"]
+        assert len(ins) == 1
+        assert ins[0].evidence["count"] == 1  # only S-001 (DEV), not S-002 (QA)
+
+    def test_dev_fires_qa_does_not_independently(self):
+        """Confirm rule fires for DEV and is silent for QA in isolated tests."""
+        dev_df = _raw_df([
+            _open_k("H-001", "Em desenvolvimento", 20),
+            _open_k("S-001", "Code Review", 15, updated_days_ago=7,
+                    issuetype="DEV", parent_key="H-001"),
+        ])
+        qa_df = _raw_df([
+            _open_k("H-002", "Em desenvolvimento", 20),
+            _open_k("S-002", "Code Review", 15, updated_days_ago=7,
+                    issuetype="QA", parent_key="H-002"),
+        ])
+        dev_events = build_aging_diagnostics(dev_df, None, None, today=_TODAY)
+        qa_events = build_aging_diagnostics(qa_df, None, None, today=_TODAY)
+
+        dev_ins = [e for e in dev_events if e.title == "Itens aguardando revisão de código há dias"]
+        qa_ins = [e for e in qa_events if e.title == "Itens aguardando revisão de código há dias"]
+
+        assert len(dev_ins) == 1, "DEV should trigger Rule B"
+        assert len(qa_ins) == 0, "QA must NOT trigger Rule B"
 
 
 # ── Rule C: História parada perto da entrega ─────────────────────────────────
@@ -751,10 +816,10 @@ class TestRuleCNearDoneBlocked:
             # Rule A: open História with all subtasks done
             _open_k("H-001", "Em desenvolvimento", 20),
             _done_k("S-001", parent_key="H-001"),
-            # Rule B: subtask stuck in Code Review > 5 days
+            # Rule B: DEV subtask stuck in Code Review > 5 days
             _open_k("H-002", "Em desenvolvimento", 20),
             _open_k("S-002", "Code Review", 15, updated_days_ago=7,
-                    issuetype="Subtask", parent_key="H-002"),
+                    issuetype="DEV", parent_key="H-002"),
             # Rule C: História near done > 3 days
             _open_k("H-003", "Revisão de Produto", 20, updated_days_ago=5),
         ])

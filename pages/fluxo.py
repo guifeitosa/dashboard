@@ -14,7 +14,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from core_metrics import TERMINAL_STATUSES
+from config import get_config as _get_config
 from db import engine as _db_engine
 from components.context_bar import render_context_bar
 from squad_health import render_squad_health
@@ -22,9 +22,8 @@ from status_time import average_time_in_status, time_in_status
 
 FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif"
 
-# Statuses considered "done" — excluded from bottleneck analysis.
-# Defined once in core_metrics.TERMINAL_STATUSES; imported here to avoid drift.
-_TERMINAL = TERMINAL_STATUSES
+# Statuses considered "done" — excluded from bottleneck analysis (lowercased).
+_TERMINAL = _get_config().terminal_statuses
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

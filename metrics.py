@@ -1,9 +1,12 @@
 import pandas as pd
 
+from config import get_config as _get_config
+
 # GMUDs that reached a terminal deployment status.
 # "Implantado com Falha" counts as a failure for CFR; both count as total deploys.
-_GMUD_FAIL: frozenset[str] = frozenset({"implantado com falha"})
-_GMUD_TERMINAL: frozenset[str] = frozenset({"implantado com sucesso", "implantado com falha"})
+# Values derived from config.yaml; fall back to hardcoded sets when yaml is absent.
+_GMUD_FAIL: frozenset[str] = _get_config().gmud_failure_statuses
+_GMUD_TERMINAL: frozenset[str] = _get_config().gmud_success_statuses | _get_config().gmud_failure_statuses
 
 
 def _ensure_group_columns(df: pd.DataFrame) -> pd.DataFrame:

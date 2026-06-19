@@ -24,6 +24,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from config import get_config as _get_config
 from metrics import aggregate_metrics_by_month, calculate_metrics_summary
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -47,11 +48,9 @@ _LEVEL_RANK = {"Elite": 0, "High": 1, "Medium": 2, "Low": 3, "N/A": 99}
 # (_is_terminal). Single definition avoids the two lists drifting apart.
 # NOTE: entries are POST-normalization names — _normalize_migrated already strips
 # the " (migrated)" suffix, so "feito (migrated)" → "feito" before this is checked.
-TERMINAL_STATUSES: frozenset[str] = frozenset({
-    "feito", "concluído", "concluido", "done", "fechado", "closed",
-    "resolvido", "resolved", "completo", "completed",
-    "implantado com sucesso", "implantado com falha",
-})
+# Values derived from config.yaml (workflow groups); falls back to hardcoded set
+# when config.yaml is absent.
+TERMINAL_STATUSES: frozenset[str] = _get_config().terminal_statuses
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1384,19 +1383,24 @@ def build_aging_diagnostics(
                 )
                 events.extend([ins, rec])
 
-    # Rule B: subtasks in "Code Review" status for more than 5 days (updated as proxy).
+    # Rule B: subtask types with code review stuck past the alert threshold.
+    # Only types where has_code_review=true (e.g. DEV, Bug-Dev) — QA never has CR.
     if "parent_key" in df.columns and "updated" in df.columns:
+        _cfg_b = _get_config()
+        _cr_types = _cfg_b.subtask_types_with_code_review
+        _cr_status = _cfg_b.code_review_status
+        _cr_alert_days = _cfg_b.code_review_alert_days
         _open_cr = _df_team[
-            (_df_team["issuetype"] == "Subtask")
+            (_df_team["issuetype"].isin(_cr_types))
             & (~_df_team["is_resolved"])
-            & (_df_team["status"] == "Code Review")
+            & (_df_team["status"] == _cr_status)
         ].copy()
 
         if not _open_cr.empty:
             _open_cr["_days_waiting"] = (
                 (_today_ts - _open_cr["updated"]).dt.days.clip(lower=0)
             )
-            _stuck_b = _open_cr[_open_cr["_days_waiting"] > 5]
+            _stuck_b = _open_cr[_open_cr["_days_waiting"] > _cr_alert_days]
 
             if not _stuck_b.empty:
                 _cnt_b = len(_stuck_b)
@@ -1405,7 +1409,8 @@ def build_aging_diagnostics(
                 ins = _mk(
                     "aging", "high", "insight",
                     "Itens aguardando revisão de código há dias",
-                    f"{_cnt_b} {_item_word} esperando revisão de código há mais de 5 dias. "
+                    f"{_cnt_b} {_item_word} esperando revisão de código há mais de "
+                    f"{_cr_alert_days} dias. "
                     "Isso pode indicar falta de revisor disponível ou revisões que estão "
                     "sendo adiadas.",
                     {"count": _cnt_b, "avg_days_waiting": _avg_b},
@@ -1437,7 +1442,8 @@ def build_aging_diagnostics(
             _near_done["_days_stuck"] = (
                 (_today_ts - _near_done["updated"]).dt.days.clip(lower=0)
             )
-            _stuck_c = _near_done[_near_done["_days_stuck"] > 3]
+            _nd_alert_days = _get_config().near_done_alert_days
+            _stuck_c = _near_done[_near_done["_days_stuck"] > _nd_alert_days]
 
             if not _stuck_c.empty:
                 _cnt_c = len(_stuck_c)
@@ -1476,7 +1482,7 @@ def build_aging_diagnostics(
 
 # Late-stage statuses used to detect an empty near-done pipeline (Rule 2 of
 # build_wip_diagnostics).  Mirrors the _NEAR_DONE check in build_aging_diagnostics.
-_NEAR_DONE_STATUSES: frozenset[str] = frozenset({"Revisão de Produto", "Pronto pra produção"})
+_NEAR_DONE_STATUSES: frozenset[str] = _get_config().near_done_statuses
 
 
 def compute_wip_limit(

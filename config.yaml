@@ -1,0 +1,98 @@
+jira:
+  url: "https://suaempresa.atlassian.net"
+  project_key: "TD"
+  custom_fields:
+    team: "customfield_10001"
+    data_implantacao: "customfield_10015"
+
+workflow:
+  groups:
+    padrao:
+      types: ["História", "Melhoria", "Dívida Técnica", "Tarefa", "Spike"]
+      terminal: ["Concluído", "Done", "Feito", "Feito (migrated)"]
+      near_done: ["Revisão de Produto", "Pronto pra produção"]
+      in_progress:
+        - "Em desenvolvimento"
+        - "Em testes"
+        - "Em Refinamento"
+        - "Revisão de Produto"
+      flow_order:
+        - "Backlog"
+        - "Discovery"
+        - "Design"
+        - "Pronto pra Refinamento"
+        - "Em Refinamento"
+        - "Pronto pra desenvolvimento"
+        - "Sprint Backlog"
+        - "Em desenvolvimento"
+        - "Pronto pra testes"
+        - "Em testes"
+        - "Revisão de Produto"
+        - "Pronto pra produção"
+        - "Concluído"
+
+    incidente:
+      types: ["Incidente"]
+      terminal: ["Concluído", "Done"]
+      in_progress:
+        - "Em Desenvolvimento"
+        - "Em Validação"
+        - "Pronto pra Prod"
+      flow_order:
+        - "Sprint Backlog"
+        - "Em Desenvolvimento"
+        - "Em Validação"
+        - "Pronto pra Prod"
+        - "Concluído"
+
+    gmud:
+      types: ["GMUD"]
+      terminal_success: ["Implantado com Sucesso"]
+      terminal_failure: ["Implantado com Falha"]
+      in_progress:
+        - "Aguardando Implantação"
+        - "Em Validação"
+        - "Aguardando Solicitante"
+      flow_order:
+        - "Sprint Backlog"
+        - "Aguardando Implantação"
+        - "Em Validação"
+        - "Aguardando Solicitante"
+        - "Implantado com Sucesso"
+
+    subtask_dev:
+      types: ["DEV", "Bug-Dev"]
+      terminal: ["Concluído", "Done"]
+      has_code_review: true
+      code_review_status: "Code Review"
+      in_progress:
+        - "Em desenvolvimento"
+        - "Code Review"
+      flow_order:
+        - "Sprint Backlog"
+        - "Em desenvolvimento"
+        - "Code Review"
+        - "Concluído"
+
+    subtask_qa:
+      types: ["QA"]
+      terminal: ["Concluído", "Done"]
+      has_code_review: false
+      in_progress:
+        - "Em desenvolvimento"
+      flow_order:
+        - "Sprint Backlog"
+        - "Em desenvolvimento"
+        - "Concluído"
+
+teams:
+  source: "jira_field"
+  fallback: "round_robin"
+  names: ["Time Alpha", "Time Beta", "Time Gamma"]
+
+display:
+  max_home_diagnostics: 4
+  wip_limit_multiplier: 1.5
+  aging_critical_days: 30
+  code_review_alert_days: 5
+  near_done_alert_days: 3
