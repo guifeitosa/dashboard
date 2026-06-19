@@ -287,17 +287,13 @@ def main():
             prev_snapshots=_prev_snaps,
         )
 
-        # Find high/critical insight events; deduplicate by bottleneck_status
-        _raw_insights = [e for e in _all_events if e.layer == "insight" and e.severity in ("critical", "high")]
-        _seen_bk: set = set()
-        _high_insights = []
-        for _e in _raw_insights:
-            _bk = _e.evidence.get("bottleneck_status")
-            if _bk:
-                if _bk in _seen_bk:
-                    continue
-                _seen_bk.add(_bk)
-            _high_insights.append(_e)
+        # Engine already deduplicates by status; just filter severity and cap at 4
+        _all_high = [
+            e for e in _all_events
+            if e.layer == "insight" and e.severity in ("critical", "high")
+        ]
+        _excess_insights = _all_high[4:]
+        _high_insights = _all_high[:4]
 
         if not _high_insights:
             st.markdown(
@@ -346,6 +342,17 @@ def main():
                     )
                 _chain_html += '</div>'
                 st.html(_chain_html)
+
+            if _excess_insights:
+                _CAT_PAGE = {
+                    "wip": "pages/wip.py",
+                    "throughput": "pages/throughput.py",
+                    "aging": "pages/aging.py",
+                    "flow": "pages/fluxo.py",
+                    "lead_time": "pages/dora_executivo.py",
+                }
+                _link_page = _CAT_PAGE.get(_excess_insights[0].category, "pages/wip.py")
+                _safe_page_link(_link_page, "Ver todos os diagnósticos →")
 
     except Exception as _exc:
         st.caption(f"Diagnósticos indisponíveis: {_exc}")

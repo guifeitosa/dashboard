@@ -1457,6 +1457,245 @@ def build_aging_diagnostics(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# WIP (Work in Progress) — limits and diagnostic rules
+# ────────────────────────────────────────────────────────────────────────────
+
+# Late-stage statuses used to detect an empty near-done pipeline (Rule 2 of
+# build_wip_diagnostics).  Mirrors the _NEAR_DONE check in build_aging_diagnostics.
+_NEAR_DONE_STATUSES: frozenset[str] = frozenset({"Revisão de Produto", "Pronto pra produção"})
+
+
+def compute_wip_limit(
+    df_issues: pd.DataFrame,
+    df_transitions: Optional[pd.DataFrame] = None,
+    team: Optional[str] = None,
+) -> dict:
+    """Compute current WIP counts and limits per status using Little's Law.
+
+    Lei de Little:
+        WIP_limit_per_status = throughput_daily × avg_time_in_status_days
+        (minimum 1 per status)
+
+    Returns
+    -------
+    dict with:
+      wip_current        : {status: count}  — open issues per status right now
+      wip_limit          : {status: limit}  — computed ideal limits (min 1)
+      over_limit         : [status]         — statuses where count > limit
+      throughput_avg     : float            — monthly average resolved issues
+      lead_time_avg_days : float            — average total lead time in days
+    """
+    from status_time import average_time_in_status, build_issue_records
+
+    _EMPTY: dict = {
+        "wip_current": {},
+        "wip_limit": {},
+        "over_limit": [],
+        "throughput_avg": 0.0,
+        "lead_time_avg_days": 0.0,
+    }
+
+    if df_issues is None or df_issues.empty:
+        return _EMPTY
+
+    df = prepare_df(df_issues.copy())
+    if team is not None:
+        df = df[df["team"] == team]
+    if df.empty:
+        return _EMPTY
+
+    # Current WIP: open issues per non-terminal status
+    open_df = df[~df["is_resolved"]]
+    wip_current: dict[str, int] = {}
+    for _, row in open_df.iterrows():
+        status = str(row.get("status") or "Unknown")
+        if status.strip().lower() not in TERMINAL_STATUSES:
+            wip_current[status] = wip_current.get(status, 0) + 1
+
+    if not wip_current:
+        return _EMPTY
+
+    # Monthly throughput average (all resolved issues for this team)
+    resolved = df[df["is_resolved"]].copy()
+    throughput_avg = 0.0
+    if not resolved.empty:
+        resolved["_ym"] = resolved["resolutiondate"].dt.to_period("M").astype(str)
+        monthly = resolved[resolved["_ym"].notna()].groupby("_ym").size()
+        if not monthly.empty:
+            throughput_avg = float(monthly.mean())
+
+    # Average time per status from transition history
+    avg_times: dict = {}
+    if df_transitions is not None and not df_transitions.empty:
+        records = build_issue_records(df, df_transitions)
+        if records:
+            now = datetime.datetime.now()
+            raw_avg = average_time_in_status(records, now, team=None)
+            avg_times = {
+                s: td for s, td in raw_avg.items()
+                if s.strip().lower() not in TERMINAL_STATUSES
+            }
+
+    lead_time_avg_days = 0.0
+    if avg_times:
+        lead_time_avg_days = sum(td.total_seconds() for td in avg_times.values()) / 86400.0
+
+    # Little's Law: WIP_limit = throughput_daily × avg_days_in_status
+    _WORKING_DAYS = 21.0
+    throughput_daily = throughput_avg / _WORKING_DAYS if throughput_avg > 0 else 0.0
+
+    wip_limit: dict[str, int] = {}
+    for status in wip_current:
+        if throughput_daily > 0:
+            if status in avg_times:
+                time_days = avg_times[status].total_seconds() / 86400.0
+            else:
+                n = max(1, len(wip_current))
+                time_days = (lead_time_avg_days / n) if lead_time_avg_days > 0 else 1.0
+            wip_limit[status] = max(1, math.ceil(throughput_daily * time_days))
+        else:
+            wip_limit[status] = max(1, wip_current[status])
+
+    over_limit = [s for s in wip_current if wip_current[s] > wip_limit.get(s, 0)]
+
+    return {
+        "wip_current": wip_current,
+        "wip_limit": wip_limit,
+        "over_limit": over_limit,
+        "throughput_avg": throughput_avg,
+        "lead_time_avg_days": lead_time_avg_days,
+    }
+
+
+def build_wip_diagnostics(
+    wip_data: dict,
+    wip_history: "pd.DataFrame",
+    *,
+    team_label: str = "Todos",
+    period: str = "",
+) -> list:
+    """Interpret WIP data and return list[InsightEvent].
+
+    Three rules, evaluated independently:
+      Rule 1 (high):   Any status is above its WIP limit (Lei de Little).
+      Rule 2 (medium): Near-done pipeline is empty while early stages have items.
+      Rule 3 (high):   Total WIP > 1.5× 4-week historical average.
+
+    Parameters
+    ----------
+    wip_data   : dict from compute_wip_limit()
+    wip_history: DataFrame from reconstruct_wip_history() — may be empty
+    team_label : display label for the team (event metadata)
+    period     : YYYY-MM period string (event IDs and metadata)
+
+    Returns
+    -------
+    list[InsightEvent] — one insight+recommendation pair per fired rule.
+    """
+    from insights import InsightEvent
+
+    events: list = []
+    _ctr: dict[str, int] = {}
+
+    def _nid(cat: str, sev: str) -> str:
+        base = f"{cat}_{sev}_{period}"
+        n = _ctr.get(base, 0)
+        _ctr[base] = n + 1
+        return base if n == 0 else f"{base}_{n}"
+
+    def _mk(cat, sev, layer, title, desc, evidence, related=None):
+        return InsightEvent(
+            id=_nid(cat, sev),
+            severity=sev,
+            category=cat,
+            layer=layer,
+            title=title,
+            description=desc,
+            evidence=evidence or {},
+            related_ids=related or [],
+            team=team_label,
+            period=period,
+        )
+
+    wip_current = wip_data.get("wip_current", {})
+    wip_limit   = wip_data.get("wip_limit", {})
+    over_limit  = wip_data.get("over_limit", [])
+
+    # Rule 1: status above limit — one insight+rec pair per offending status
+    for status in over_limit:
+        n     = wip_current.get(status, 0)
+        limit = wip_limit.get(status, 0)
+        ins = _mk(
+            "wip", "high", "insight",
+            f"Trabalho acumulando em {status}",
+            f"Há {n} itens em '{status}' agora — o time historicamente consegue absorver até {limit} "
+            f"ao mesmo tempo. Quanto mais acumula, mais tempo cada item leva pra terminar.",
+            {"status": status, "n": n, "limit": limit},
+        )
+        rec = _mk(
+            "wip", "info", "recommendation",
+            f"Não começar nada novo em '{status}' até reduzir o que está lá",
+            f"Pause entradas em '{status}' e foque em terminar o que já está em andamento. "
+            "Terminar antes de começar novo acelera as entregas.",
+            {},
+            related=[ins.id],
+        )
+        events.extend([ins, rec])
+
+    # Rule 2: near-done pipeline empty while work is piling up upstream
+    near_done_total = sum(wip_current.get(s, 0) for s in _NEAR_DONE_STATUSES)
+    early_total = sum(v for s, v in wip_current.items() if s not in _NEAR_DONE_STATUSES)
+
+    if near_done_total == 0 and early_total > 0:
+        ins = _mk(
+            "wip", "medium", "insight",
+            "Nada chegando perto da entrega",
+            f"O time tem {early_total} iten(s) em andamento, mas nenhum está nos últimos passos "
+            "antes da entrega. Pode indicar que muita coisa foi começada sem nada ser terminado.",
+            {"early_total": early_total, "near_done_total": 0},
+        )
+        rec = _mk(
+            "wip", "info", "recommendation",
+            "Focar em terminar antes de começar mais",
+            "Tente levar pelo menos um item até o status mais avançado antes de puxar novos do backlog. "
+            "Isso reduz o tempo médio de entrega para o usuário.",
+            {},
+            related=[ins.id],
+        )
+        events.extend([ins, rec])
+
+    # Rule 3: total WIP > 1.5× 4-week historical average
+    if wip_history is not None and not wip_history.empty and wip_current:
+        total_per_date = wip_history.groupby("date")["count"].sum().sort_index()
+        if len(total_per_date) >= 2:
+            historical = total_per_date.iloc[:-1].tail(4)
+            hist_avg = float(historical.mean())
+            current_total = sum(wip_current.values())
+
+            if hist_avg > 0 and current_total > hist_avg * 1.5:
+                pct_above = (current_total / hist_avg - 1) * 100
+                ins = _mk(
+                    "wip", "high", "insight",
+                    "Time com mais trabalho em aberto do que o normal",
+                    f"O total de itens em andamento ({current_total}) está {pct_above:.0f}% acima do "
+                    f"ritmo habitual das últimas semanas ({hist_avg:.0f} em média). "
+                    "Isso tende a aumentar o tempo de entrega.",
+                    {"current_total": current_total, "hist_avg": hist_avg, "pct_above": pct_above},
+                )
+                rec = _mk(
+                    "wip", "info", "recommendation",
+                    "Reduzir itens em andamento antes de puxar mais",
+                    "Quando muita coisa roda ao mesmo tempo, cada item espera mais na fila. "
+                    "Fechar alguns itens antes de abrir novos ajuda todo o time a entregar mais rápido.",
+                    {},
+                    related=[ins.id],
+                )
+                events.extend([ins, rec])
+
+    return events
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # DORA diagnostic rules
 # ────────────────────────────────────────────────────────────────────────────
 

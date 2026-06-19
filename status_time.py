@@ -9,6 +9,8 @@ tzinfo before writing to SQLite, so values coming from the DB are ready to use.
 from datetime import datetime, timedelta
 from typing import Optional
 
+import pandas as pd
+
 
 def time_in_status(
     issue_key: str,
@@ -152,3 +154,190 @@ def lead_time_real(
             return tr["changed_at"] - start_time
 
     return None
+
+
+# ── WIP history helpers ───────────────────────────────────────────────────────
+
+def build_issue_records(
+    df_issues: pd.DataFrame,
+    df_transitions: pd.DataFrame,
+) -> list[dict]:
+    """Convert DataFrames to list-of-dicts format for average_time_in_status.
+
+    This is the public version of insights._build_flow_records, placed here to
+    avoid circular imports when core_metrics calls it for WIP limit computation.
+    """
+    trans_by_key: dict[str, list[dict]] = {}
+    if df_transitions is not None and not df_transitions.empty:
+      for _, row in df_transitions.iterrows():
+        key = row.get("issue_key")
+        if key is None:
+            continue
+        raw_ts = row["changed_at"]
+        try:
+            if pd.isna(raw_ts):
+                continue
+        except (TypeError, ValueError):
+            pass
+        try:
+            if isinstance(raw_ts, datetime):
+                changed_at = raw_ts.replace(tzinfo=None) if raw_ts.tzinfo else raw_ts
+            else:
+                changed_at = pd.Timestamp(raw_ts).to_pydatetime().replace(tzinfo=None)
+        except Exception:
+            continue
+        entry = {
+            "from_status": row.get("from_status"),
+            "to_status": row.get("to_status"),
+            "changed_at": changed_at,
+        }
+        trans_by_key.setdefault(str(key), []).append(entry)
+
+    records = []
+    for _, row in df_issues.iterrows():
+        key = str(row.get("key", row.get("issue_key", "")))
+        created = row.get("created")
+        if created is None or (isinstance(created, float) and pd.isna(created)):
+            continue
+        if hasattr(created, "tzinfo") and created.tzinfo is not None:
+            created = created.replace(tzinfo=None)
+        if not isinstance(created, datetime):
+            created = pd.Timestamp(created).to_pydatetime().replace(tzinfo=None)
+
+        resdate_raw = row.get("resolutiondate")
+        resdate = None
+        if resdate_raw is not None:
+            try:
+                if pd.isna(resdate_raw):
+                    resdate = None
+                elif isinstance(resdate_raw, datetime):
+                    resdate = resdate_raw.replace(tzinfo=None) if resdate_raw.tzinfo else resdate_raw
+                else:
+                    resdate = pd.Timestamp(resdate_raw).to_pydatetime().replace(tzinfo=None)
+            except Exception:
+                resdate = None
+
+        records.append({
+            "issue_key": key,
+            "created": created,
+            "resolutiondate": resdate,
+            "team": row.get("team"),
+            "issuetype": row.get("issuetype"),
+            "status": row.get("status"),
+            "transitions": trans_by_key.get(key, []),
+        })
+    return records
+
+
+def _status_at(
+    transitions: list[dict],
+    snap_dt: datetime,
+    *,
+    current_status: Optional[str],
+) -> Optional[str]:
+    """Return the status of an issue at snap_dt based on its transition history.
+
+    Transitions do not need to be pre-sorted.
+
+    - If there are transitions at or before snap_dt: return the to_status of the
+      latest one (the most recent known state).
+    - If all transitions are in the future: return the from_status of the earliest
+      transition (the state before anything changed).
+    - If there are no transitions at all: return current_status.
+    """
+    if not transitions:
+        return current_status
+    sorted_tr = sorted(transitions, key=lambda t: t["changed_at"])
+    last_past: Optional[dict] = None
+    for tr in sorted_tr:
+        if tr["changed_at"] <= snap_dt:
+            last_past = tr
+        else:
+            break
+    if last_past is not None:
+        return last_past.get("to_status") or current_status
+    # All transitions are future → state before first transition
+    return sorted_tr[0].get("from_status") or current_status
+
+
+def reconstruct_wip_history(
+    df_issues: pd.DataFrame,
+    df_transitions: pd.DataFrame,
+    freq: str = "W",
+    team: Optional[str] = None,
+    today: Optional[datetime] = None,
+) -> pd.DataFrame:
+    """Reconstruct WIP count by status and team across periodic snapshots.
+
+    Algorithm (per snapshot date):
+      - Issue is "in flight" if created ≤ snap AND (resolutiondate IS NULL OR > snap).
+      - Status at snap is determined by _status_at using transition history.
+      - Terminal statuses are excluded from the WIP count.
+
+    Returns DataFrame with columns: date | status | count | team.
+    """
+    from core_metrics import TERMINAL_STATUSES  # lazy: avoids circular import at load time
+
+    _EMPTY = pd.DataFrame(columns=["date", "status", "count", "team"])
+
+    if df_issues is None or df_issues.empty:
+        return _EMPTY
+
+    records = build_issue_records(df_issues, df_transitions)
+    if not records:
+        return _EMPTY
+
+    if today is None:
+        today_dt: datetime = datetime.now()
+    elif isinstance(today, datetime):
+        today_dt = today
+    else:
+        today_dt = pd.Timestamp(today).to_pydatetime()
+
+    if team is not None:
+        records = [r for r in records if r.get("team") == team]
+    if not records:
+        return _EMPTY
+
+    min_created = min(r["created"] for r in records)
+    date_range = pd.date_range(start=min_created, end=today_dt, freq=freq)
+    if len(date_range) == 0:
+        return _EMPTY
+
+    rows: list[dict] = []
+    for snap in date_range:
+        snap_dt = snap.to_pydatetime().replace(tzinfo=None)
+
+        for rec in records:
+            if rec["created"] > snap_dt:
+                continue
+            resdate = rec.get("resolutiondate")
+            if resdate is not None and resdate <= snap_dt:
+                continue
+
+            status = _status_at(
+                rec.get("transitions", []),
+                snap_dt,
+                current_status=rec.get("status"),
+            )
+            if status is None:
+                continue
+            if status.strip().lower() in TERMINAL_STATUSES:
+                continue
+
+            rows.append({
+                "date": snap,
+                "status": status,
+                "team": rec.get("team") or "Sem Time",
+            })
+
+    if not rows:
+        return _EMPTY
+
+    result = (
+        pd.DataFrame(rows)
+        .groupby(["date", "status", "team"], as_index=False)
+        .size()
+        .rename(columns={"size": "count"})
+    )
+    return result[["date", "status", "count", "team"]]

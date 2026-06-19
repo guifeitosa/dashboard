@@ -195,9 +195,69 @@ class InsightEngine:
         all_events.extend(
             self._analyze_flow(team_arg, team_label, period, df, df_transitions, all_events)
         )
+        all_events.extend(
+            self._analyze_wip(team_arg, team_label, period, df, df_transitions)
+        )
 
         all_events.sort(key=lambda e: SEVERITY_ORDER.get(e.severity, 99))
-        return all_events
+        return self._dedup_by_status(all_events)
+
+    def _dedup_by_status(self, events: list[InsightEvent]) -> list[InsightEvent]:
+        """Remove insight duplicates that flag the same status from different categories.
+
+        WIP events carry evidence["status"]; Throughput/Aging events carry
+        evidence["bottleneck_status"]. When both fire for the same status, keep
+        only the higher-severity one. Equal severity resolves by category
+        preference: wip > throughput/aging (WIP has quantitative limit evidence).
+
+        Non-insight events (recommendations, diagnostics) are dropped when all
+        their related insights have been removed.
+        """
+        _CATEGORY_PREF: dict[str, int] = {"wip": 0, "throughput": 1, "aging": 1}
+
+        def _status_key(e: InsightEvent) -> str | None:
+            if e.layer != "insight":
+                return None
+            return e.evidence.get("status") or e.evidence.get("bottleneck_status")
+
+        # Group insight events by the status they reference
+        by_status: dict[str, list[InsightEvent]] = {}
+        for e in events:
+            key = _status_key(e)
+            if key is not None:
+                by_status.setdefault(key, []).append(e)
+
+        if all(len(g) == 1 for g in by_status.values()):
+            return events  # fast path: no duplicates
+
+        # Collect IDs of the losers
+        dropped_ids: set[str] = set()
+        for group in by_status.values():
+            if len(group) <= 1:
+                continue
+            best = min(
+                group,
+                key=lambda e: (
+                    SEVERITY_ORDER.get(e.severity, 99),
+                    _CATEGORY_PREF.get(e.category, 99),
+                ),
+            )
+            for e in group:
+                if e.id != best.id:
+                    dropped_ids.add(e.id)
+
+        if not dropped_ids:
+            return events
+
+        def _keep(e: InsightEvent) -> bool:
+            if e.id in dropped_ids:
+                return False
+            # Drop linked events only when ALL their related insights were dropped
+            if e.related_ids and all(rid in dropped_ids for rid in e.related_ids):
+                return False
+            return True
+
+        return [e for e in events if _keep(e)]
 
     # ── Throughput ────────────────────────────────────────────────────────────
 
@@ -459,5 +519,34 @@ class InsightEngine:
 
             return [diag, rec]
 
+        except Exception:
+            return []
+
+    # ── WIP ───────────────────────────────────────────────────────────────────
+
+    def _analyze_wip(
+        self,
+        team_arg: str | None,
+        team_label: str,
+        period: str,
+        df: "pd.DataFrame",
+        df_transitions: "pd.DataFrame",
+    ) -> list[InsightEvent]:
+        if df_transitions is None or df_transitions.empty:
+            return []
+
+        try:
+            from core_metrics import compute_wip_limit, build_wip_diagnostics
+            from status_time import reconstruct_wip_history
+        except ImportError:
+            return []
+
+        try:
+            wip_data = compute_wip_limit(df, df_transitions, team=team_arg)
+            wip_history = reconstruct_wip_history(df, df_transitions, team=team_arg)
+            return build_wip_diagnostics(
+                wip_data, wip_history,
+                team_label=team_label, period=period,
+            )
         except Exception:
             return []
