@@ -5,7 +5,8 @@ import streamlit as st
 
 from core_metrics import build_wip_diagnostics, compute_wip_limit, prepare_df
 from db import engine
-from squad_health import render_context_bar, render_squad_health
+from components.context_bar import render_context_bar
+from squad_health import render_squad_health
 from status_time import reconstruct_wip_history
 
 # Canonical flow order for História issues

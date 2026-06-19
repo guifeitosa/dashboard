@@ -27,6 +27,7 @@ class InsightEvent:
     related_ids: list[str] = field(default_factory=list)
     team: str = "Todos"
     period: str = ""
+    why_it_matters: list[str] = field(default_factory=list)
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────

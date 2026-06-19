@@ -5,9 +5,11 @@ import re
 import pandas as pd
 import streamlit as st
 
+from components.cards import render_insight_card, render_metric_card
+from components.context_bar import render_context_bar
 from core_metrics import compute_aging, prepare_df
 from db import engine
-from squad_health import compute_squad_health, render_context_bar, render_squad_health
+from squad_health import compute_squad_health, render_squad_health
 
 _LEVEL_COLOR = {
     "Elite": "#15803d", "High": "#22c55e",
@@ -177,11 +179,30 @@ def main():
         if tp_val is not None else "Sem dados"
     )
 
-    aging_color = "#dc2626" if pct_red > 60 else "#ca8a04" if pct_red > 30 else "#15803d"
+    # Compute score deltas from squad health impacts (proxy for metric direction)
+    _impacts_by_key = {i["key"]: i for i in h.get("impacts", [])}
+
+    def _score_delta(key: str) -> tuple[str | None, bool | None]:
+        imp = _impacts_by_key.get(key)
+        if imp is None:
+            return None, None
+        pts = imp["delta_points"]
+        return f"{pts:+.0f} pts no score", pts > 0
+
+    dora_delta, dora_delta_pos = _score_delta("lead_time")
+    tp_delta,   tp_delta_pos   = _score_delta("throughput")
+    aging_delta, aging_delta_pos = _score_delta("aging")
+
+    _dora_badge_sev = {
+        "Elite": "elite", "High": "high", "Medium": "medium", "Low": "low",
+    }.get(worst_band, "n/a")
+    _tp_badge_sev = {
+        "Boa": "boa", "Atenção": "atencao", "Crítica": "critico",
+    }.get(tp_status, "n/a")
+    _aging_badge_sev = "critico" if pct_red > 60 else "atencao" if pct_red > 30 else "boa"
+    _aging_badge_label = "Crítico" if pct_red > 60 else "Atenção" if pct_red > 30 else "Boa"
 
     def _safe_page_link(path: str, label: str) -> None:
-        # st.page_link requires the navigation context from app.py;
-        # silently skip when the page runs outside that context (e.g. tests).
         try:
             st.page_link(path, label=label)
         except Exception:
@@ -189,19 +210,44 @@ def main():
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.html(_page_card("📊", "DORA Executivo", worst_band, dora_color, dora_detail))
-        _safe_page_link("pages/dora_executivo.py", "Ver Executivo →")
+        render_metric_card(
+            title="DORA Executivo",
+            icon="📊",
+            value=worst_band,
+            subtitle=dora_detail,
+            badge_label=worst_band,
+            badge_severity=_dora_badge_sev,
+            delta=dora_delta,
+            delta_positive=dora_delta_pos,
+            link_label="Ver Executivo →",
+            link_page="pages/dora_executivo.py",
+        )
     with c2:
-        st.html(_page_card("📈", "Throughput", tp_status, tp_color, tp_detail))
-        _safe_page_link("pages/throughput.py", "Ver Throughput →")
+        render_metric_card(
+            title="Throughput",
+            icon="📈",
+            value=tp_status,
+            subtitle=tp_detail,
+            badge_label=tp_status,
+            badge_severity=_tp_badge_sev,
+            delta=tp_delta,
+            delta_positive=tp_delta_pos,
+            link_label="Ver Throughput →",
+            link_page="pages/throughput.py",
+        )
     with c3:
-        st.html(_page_card(
-            "⏳", "Aging",
-            f"{total_open} abertos",
-            aging_color,
-            f"{n_red} itens ({pct_red:.0f}%) há mais de 30 dias",
-        ))
-        _safe_page_link("pages/aging.py", "Ver Aging →")
+        render_metric_card(
+            title="Aging",
+            icon="⏳",
+            value=f"{total_open} abertos",
+            subtitle=f"{n_red} itens ({pct_red:.0f}%) há mais de 30 dias",
+            badge_label=_aging_badge_label,
+            badge_severity=_aging_badge_sev,
+            delta=aging_delta,
+            delta_positive=aging_delta_pos,
+            link_label="Ver Aging →",
+            link_page="pages/aging.py",
+        )
 
     # ── 2. Maior Oportunidade ─────────────────────────────────────────────────
     _section_label("Maior Oportunidade")
@@ -302,12 +348,11 @@ def main():
             )
         else:
             for _ins in _high_insights:
-                # Find diagnostic linked to this insight
+                # Resolve linked diagnostic and recommendation
                 _diag = next(
                     (e for e in _all_events if e.layer == "diagnostic" and _ins.id in e.related_ids),
                     None,
                 )
-                # Find recommendation: through diagnostic if exists, else directly from insight
                 if _diag is not None:
                     _rec = next(
                         (e for e in _all_events if e.layer == "recommendation" and _diag.id in e.related_ids),
@@ -318,30 +363,13 @@ def main():
                         (e for e in _all_events if e.layer == "recommendation" and _ins.id in e.related_ids),
                         None,
                     )
-
-                # Render chain — always expanded, no collapse
-                _sev_color = {"critical": "#dc2626", "high": "#ca8a04"}.get(_ins.severity, "#64748b")
-                _chain_html = (
-                    f'<div style="background:white;border-radius:12px;padding:16px 20px;'
-                    f'box-shadow:0 1px 4px rgba(0,0,0,0.07);border-left:4px solid {_sev_color};'
-                    f'margin-bottom:10px;font-family:{_FONT};">'
-                    f'<div style="font-size:14px;font-weight:700;color:{_sev_color};margin-bottom:8px;">'
-                    f'⚠ {_ins.title}</div>'
-                    f'<div style="font-size:13px;color:#374151;margin-bottom:6px;">{_ins.description}</div>'
+                render_insight_card(
+                    title=_ins.title,
+                    description=_ins.description,
+                    recommendation=_rec.description if _rec else "—",
+                    severity=_ins.severity,
+                    why_it_matters=_ins.why_it_matters or [],
                 )
-                if _diag is not None:
-                    _chain_html += (
-                        f'<div style="font-size:12px;color:#64748b;margin-bottom:5px;padding-top:6px;'
-                        f'border-top:1px solid #f1f5f9;">'
-                        f'💡 <strong>O que está acontecendo:</strong> {_diag.description}</div>'
-                    )
-                if _rec is not None:
-                    _chain_html += (
-                        f'<div style="font-size:12px;color:#15803d;">'
-                        f'✅ <strong>O que você pode fazer:</strong> {_rec.description}</div>'
-                    )
-                _chain_html += '</div>'
-                st.html(_chain_html)
 
             if _excess_insights:
                 _CAT_PAGE = {

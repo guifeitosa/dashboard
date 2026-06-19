@@ -16,7 +16,8 @@ import streamlit as st
 
 from core_metrics import TERMINAL_STATUSES
 from db import engine as _db_engine
-from squad_health import render_context_bar, render_squad_health
+from components.context_bar import render_context_bar
+from squad_health import render_squad_health
 from status_time import average_time_in_status, time_in_status
 
 FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif"

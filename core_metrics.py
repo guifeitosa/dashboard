@@ -1074,6 +1074,11 @@ def build_throughput_diagnostics(
                 "Um pode estar causando o outro.",
                 {"tp_cur": tp_cur, "tp_prev": tp_prev, "pct_crit": pct_crit},
             )
+            ins.why_it_matters = [
+                "Menos entregas = menos valor chegando ao usuário",
+                "Quedas consistentes indicam problema sistêmico, não pontual",
+                "Vale investigar antes que vire tendência",
+            ]
             rec = _mk(
                 "throughput", "info", "recommendation",
                 "Priorizar itens mais antigos",
@@ -1405,6 +1410,10 @@ def build_aging_diagnostics(
                     "sendo adiadas.",
                     {"count": _cnt_b, "avg_days_waiting": _avg_b},
                 )
+                ins.why_it_matters = [
+                    "Code Review parado bloqueia todo o time, não só quem escreveu",
+                    "Revisões acumuladas perdem contexto e ficam mais difíceis de fazer",
+                ]
                 rec = _mk(
                     "aging", "info", "recommendation",
                     "Distribuir revisões entre o time",
@@ -1443,6 +1452,11 @@ def build_aging_diagnostics(
                     "alto retorno.",
                     {"count": _cnt_c, "issue_keys": _keys_c},
                 )
+                ins.why_it_matters = [
+                    "Itens parados perto da entrega têm o maior retorno por esforço",
+                    "Cada dia parado aqui = atraso direto pro usuário",
+                    "Geralmente são os mais fáceis de desbloquear",
+                ]
                 rec = _mk(
                     "aging", "high", "recommendation",
                     "Priorizar essas histórias na conversa com o time",
@@ -1632,6 +1646,11 @@ def build_wip_diagnostics(
             f"ao mesmo tempo. Quanto mais acumula, mais tempo cada item leva pra terminar.",
             {"status": status, "n": n, "limit": limit},
         )
+        ins.why_it_matters = [
+            "Mais itens simultâneos = mais tempo pra terminar cada um",
+            "Reduzir o paralelo acelera as entregas sem precisar trabalhar mais",
+            "Times que limitam WIP entregam com mais previsibilidade",
+        ]
         rec = _mk(
             "wip", "info", "recommendation",
             f"Não começar nada novo em '{status}' até reduzir o que está lá",
@@ -1843,6 +1862,11 @@ def build_dora_diagnostics(
                 {"key": key, "cur_band": cur_band, "prv_band": prv_band,
                  "cur_v": cur_v, "prv_v": prv_v},
             )
+            if key == "cfr_percent":
+                ins.why_it_matters = [
+                    "Cada falha em produção custa tempo de correção e confiança do usuário",
+                    "CFR alto indica que mudanças estão chegando sem validação suficiente",
+                ]
             rec = _mk(
                 cat, "info", "recommendation",
                 f"Investigar {_DORA_TITLES_WORSENED[key].lower()}",

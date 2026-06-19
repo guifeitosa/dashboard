@@ -6,7 +6,8 @@ import streamlit as st
 from core_metrics import build_dora_diagnostics, dora_band, prepare_df
 from db import engine
 from metrics import aggregate_metrics_by_month, calculate_metrics_summary
-from squad_health import render_context_bar, render_squad_health
+from components.context_bar import render_context_bar
+from squad_health import render_squad_health
 
 MONTH_PT = {
     "01": "JAN", "02": "FEV", "03": "MAR", "04": "ABR",

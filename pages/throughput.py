@@ -9,7 +9,8 @@ from core_metrics import (
     prepare_df,
 )
 from db import engine
-from squad_health import render_context_bar, render_squad_health
+from components.context_bar import render_context_bar
+from squad_health import render_squad_health
 
 MONTH_PT = {
     "01": "JAN", "02": "FEV", "03": "MAR", "04": "ABR",
@@ -133,8 +134,9 @@ def _month_detail(month_ym: str, filt_df: pd.DataFrame, monthly_df: pd.DataFrame
 
     st.markdown("**Distribuição por Tipo**")
 
+    _SUBTASK_TYPES = {"Subtask", "Sub-task", "Subtarefa"}
     type_dist = (
-        m_data.groupby("issuetype").size()
+        m_data[~m_data["issuetype"].isin(_SUBTASK_TYPES)].groupby("issuetype").size()
         .reset_index(name="count")
         .assign(pct=lambda d: (d["count"] / d["count"].sum() * 100).round(1))
     )
@@ -450,7 +452,8 @@ def main():
         st.session_state.tp_last_clicked = None
 
     # ── Type distribution + Insights ─────────────────────────────────────────
-    type_counts = filt.groupby("issuetype").size().reset_index(name="count")
+    _SUBTASK_TYPES = {"Subtask", "Sub-task", "Subtarefa"}
+    type_counts = filt[~filt["issuetype"].isin(_SUBTASK_TYPES)].groupby("issuetype").size().reset_index(name="count")
     type_counts["pct"] = (type_counts["count"] / type_counts["count"].sum() * 100).round(1)
     type_counts["pct_label"] = type_counts["pct"].apply(lambda p: f"{p:.0f}%")
     type_counts["color"] = type_counts["issuetype"].map(

@@ -148,17 +148,4 @@ def render_squad_health() -> None:
     st.html(card)
 
 
-def render_context_bar(period: str | None = None) -> None:
-    """Slim bar showing the active team filter (and optional period) for every page."""
-    team = st.session_state.get("global_team", "Todos")
-    parts = [f"<strong>Mostrando:</strong> {team}"]
-    if period:
-        parts.append(f"<strong>Período:</strong> {period}")
-    text = "&nbsp;&nbsp;·&nbsp;&nbsp;".join(parts)
-    st.markdown(
-        f'<div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;'
-        f'padding:7px 16px;margin-bottom:14px;font-size:13px;color:#3730a3;'
-        f'font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif;">'
-        f'🔍 {text}</div>',
-        unsafe_allow_html=True,
-    )
+from components.context_bar import render_context_bar  # re-exported for backward compat

@@ -7,7 +7,8 @@ import streamlit as st
 
 from core_metrics import build_aging_diagnostics, compute_aging, prepare_df
 from db import engine
-from squad_health import render_context_bar, render_squad_health
+from components.context_bar import render_context_bar
+from squad_health import render_squad_health
 
 OVER_REP_THRESHOLD = 15  # pp
 
