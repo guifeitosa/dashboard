@@ -39,6 +39,22 @@ _FALLBACK_SUBTASK_CR_TYPES: frozenset[str] = frozenset({"Subtask"})
 _FALLBACK_ALL_SUBTASK_TYPES: frozenset[str] = frozenset({"Subtask"})
 _FALLBACK_CODE_REVIEW_STATUS: str = "Code Review"
 
+# Fallback lead/cycle time configs (used when config.yaml is absent)
+_FALLBACK_PADRAO_TYPES_LOWER: frozenset[str] = frozenset({
+    "história", "historia", "melhoria", "tarefa",
+    "dívida técnica", "divida tecnica", "spike",
+})
+_FALLBACK_LEAD_TIME_CFG: dict = {
+    "start_status": "Em desenvolvimento",
+    "end_status": "Concluído",
+    "fallback_start": "created",
+}
+_FALLBACK_CYCLE_TIME_CFG: dict = {
+    "start_status": "Em desenvolvimento",
+    "end_status": "Revisão de Produto",
+    "fallback_end": "Concluído",
+}
+
 
 def _norm(s: str) -> str:
     """Strip '(migrated)' suffix and lowercase — matches jira_client._normalize_migrated + .lower()."""
@@ -143,6 +159,40 @@ class DashboardConfig:
         """Return the list of issuetypes in a given group."""
         groups = self._raw.get("workflow", {}).get("groups", {})
         return list(groups.get(group_name, {}).get("types", []))
+
+    def lead_time_config(self, issuetype: str) -> dict | None:
+        """Return the lead_time config dict for an issuetype, or None if not measured.
+
+        Groups with ``lead_time: null`` (e.g. GMUD, Incidente, subtasks) return None.
+        Unknown issuetypes fall back to the 'padrao' group config.
+        """
+        groups = self._raw.get("workflow", {}).get("groups", {})
+        if not groups:
+            # No yaml — apply fallback for historically known padrao types
+            if issuetype.lower() in _FALLBACK_PADRAO_TYPES_LOWER:
+                return dict(_FALLBACK_LEAD_TIME_CFG)
+            return None
+        for g in groups.values():
+            if issuetype in g.get("types", []):
+                lt = g.get("lead_time")
+                return dict(lt) if lt else None
+        # Unknown type: fall back to padrao
+        lt = groups.get("padrao", {}).get("lead_time")
+        return dict(lt) if lt else None
+
+    def cycle_time_config(self, issuetype: str) -> dict | None:
+        """Return the cycle_time config dict for an issuetype, or None if not measured."""
+        groups = self._raw.get("workflow", {}).get("groups", {})
+        if not groups:
+            if issuetype.lower() in _FALLBACK_PADRAO_TYPES_LOWER:
+                return dict(_FALLBACK_CYCLE_TIME_CFG)
+            return None
+        for g in groups.values():
+            if issuetype in g.get("types", []):
+                ct = g.get("cycle_time")
+                return dict(ct) if ct else None
+        ct = groups.get("padrao", {}).get("cycle_time")
+        return dict(ct) if ct else None
 
     # ── Display properties ────────────────────────────────────────────────────
 

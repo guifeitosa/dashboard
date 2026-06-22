@@ -30,6 +30,16 @@ workflow:
         - "Revisão de Produto"
         - "Pronto pra produção"
         - "Concluído"
+      lead_time:
+        start_status: "Em desenvolvimento"
+        end_status: "Concluído"
+        fallback_start: "created"
+        note: "Estimado via Jira · Em desenvolvimento → Concluído"
+      cycle_time:
+        start_status: "Em desenvolvimento"
+        end_status: "Revisão de Produto"
+        fallback_end: "Concluído"
+        note: "Estimado via Jira · Em desenvolvimento → Revisão de Produto"
 
     incidente:
       types: ["Incidente"]
@@ -44,6 +54,8 @@ workflow:
         - "Em Validação"
         - "Pronto pra Prod"
         - "Concluído"
+      lead_time: null
+      cycle_time: null
 
     gmud:
       types: ["GMUD"]
@@ -59,6 +71,8 @@ workflow:
         - "Em Validação"
         - "Aguardando Solicitante"
         - "Implantado com Sucesso"
+      lead_time: null
+      cycle_time: null
 
     subtask_dev:
       types: ["DEV", "Bug-Dev"]
@@ -73,6 +87,8 @@ workflow:
         - "Em desenvolvimento"
         - "Code Review"
         - "Concluído"
+      lead_time: null
+      cycle_time: null
 
     subtask_qa:
       types: ["QA"]
@@ -84,6 +100,8 @@ workflow:
         - "Sprint Backlog"
         - "Em desenvolvimento"
         - "Concluído"
+      lead_time: null
+      cycle_time: null
 
 teams:
   source: "jira_field"

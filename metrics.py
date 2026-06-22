@@ -83,12 +83,21 @@ def _business_days_between(start, end):
 
 
 def calculate_lead_time_for_changes(df: pd.DataFrame) -> pd.DataFrame:
+    """DORA Lead Time for Changes: created → resolutiondate (calendar days, business-day count).
+
+    This uses the standard DORA definition (end-to-end delivery time) rather than an
+    internal status-transition proxy. Process-internal metrics (Em desenvolvimento →
+    Concluído, Cycle Time) live in the Throughput page via calculate_lead_and_cycle_time.
+    """
     df = _ensure_group_columns(df)
-    change_issue_types = {"story", "bug", "task", "história", "historia", "tarefa"}
+    padrao_types = {"história", "historia", "melhoria", "tarefa",
+                    "dívida técnica", "divida tecnica", "spike"}
     changes = df[
-        df["issuetype"].astype(str).str.lower().isin(change_issue_types) &
-        (df["is_resolved"])
+        df["issuetype"].astype(str).str.lower().isin(padrao_types) &
+        df["is_resolved"]
     ].copy()
+    if changes.empty:
+        return pd.DataFrame(columns=["team", "year_month", "lead_time_days"])
     changes["lead_time_days"] = changes.apply(
         lambda row: _business_days_between(row["created"], row["resolutiondate"]),
         axis=1,

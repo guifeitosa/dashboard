@@ -19,12 +19,22 @@ workflow:
       near_done: ["Revisão de Produto", "Pronto pra produção"]
       in_progress: ["Em desenvolvimento"]
       flow_order: ["Backlog", "Em desenvolvimento", "Revisão de Produto", "Concluído"]
+      lead_time:
+        start_status: "Em desenvolvimento"
+        end_status: "Concluído"
+        fallback_start: "created"
+      cycle_time:
+        start_status: "Em desenvolvimento"
+        end_status: "Revisão de Produto"
+        fallback_end: "Concluído"
 
     incidente:
       types: ["Incidente"]
       terminal: ["Concluído", "Done"]
       in_progress: ["Em Desenvolvimento"]
       flow_order: ["Sprint Backlog", "Em Desenvolvimento", "Concluído"]
+      lead_time: null
+      cycle_time: null
 
     gmud:
       types: ["GMUD"]
@@ -32,6 +42,8 @@ workflow:
       terminal_failure: ["Implantado com Falha"]
       in_progress: ["Aguardando Implantação"]
       flow_order: ["Sprint Backlog", "Aguardando Implantação", "Implantado com Sucesso"]
+      lead_time: null
+      cycle_time: null
 
     subtask_dev:
       types: ["DEV", "Bug-Dev"]
@@ -40,6 +52,8 @@ workflow:
       code_review_status: "Code Review"
       in_progress: ["Em desenvolvimento", "Code Review"]
       flow_order: ["Sprint Backlog", "Em desenvolvimento", "Code Review", "Concluído"]
+      lead_time: null
+      cycle_time: null
 
     subtask_qa:
       types: ["QA"]
@@ -47,6 +61,8 @@ workflow:
       has_code_review: false
       in_progress: ["Em desenvolvimento"]
       flow_order: ["Sprint Backlog", "Em desenvolvimento", "Concluído"]
+      lead_time: null
+      cycle_time: null
 
 teams:
   source: "jira_field"
@@ -224,6 +240,47 @@ class TestFallback:
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
+
+class TestLeadCycleTimeConfig:
+    def test_lead_time_config_historia_returns_dict(self, cfg):
+        lt = cfg.lead_time_config("História")
+        assert isinstance(lt, dict)
+        assert lt["start_status"] == "Em desenvolvimento"
+        assert lt["end_status"] == "Concluído"
+        assert lt["fallback_start"] == "created"
+
+    def test_lead_time_config_tarefa_returns_padrao(self, cfg):
+        lt = cfg.lead_time_config("Tarefa")
+        assert lt is not None
+        assert lt["end_status"] == "Concluído"
+
+    def test_lead_time_config_gmud_returns_none(self, cfg):
+        assert cfg.lead_time_config("GMUD") is None
+
+    def test_lead_time_config_incidente_returns_none(self, cfg):
+        assert cfg.lead_time_config("Incidente") is None
+
+    def test_lead_time_config_dev_subtask_returns_none(self, cfg):
+        assert cfg.lead_time_config("DEV") is None
+
+    def test_cycle_time_config_tarefa_returns_dict_with_fallback(self, cfg):
+        ct = cfg.cycle_time_config("Tarefa")
+        assert isinstance(ct, dict)
+        assert ct["start_status"] == "Em desenvolvimento"
+        assert ct["end_status"] == "Revisão de Produto"
+        assert ct["fallback_end"] == "Concluído"
+
+    def test_cycle_time_config_incidente_returns_none(self, cfg):
+        assert cfg.cycle_time_config("Incidente") is None
+
+    def test_cycle_time_config_gmud_returns_none(self, cfg):
+        assert cfg.cycle_time_config("GMUD") is None
+
+    def test_lead_time_config_unknown_type_falls_back_to_padrao(self, cfg):
+        lt = cfg.lead_time_config("TipoDesconhecido")
+        assert lt is not None
+        assert lt["start_status"] == "Em desenvolvimento"
+
 
 class TestSingleton:
     def test_same_instance_on_consecutive_calls(self, cfg, monkeypatch):

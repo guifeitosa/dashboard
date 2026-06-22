@@ -20,7 +20,7 @@ METRIC_DEFS = [
         "key": "lead_time_days",
         "icon": "🕐",
         "label": "Lead Time for Changes",
-        "subtitle": "(dias úteis)",
+        "subtitle": "(dias úteis, criação → entrega)",
         "icon_bg": "#dbeafe",
         "thresholds": {
             "Elite": "< 1 dia", "High": "1–7 dias",
@@ -85,6 +85,7 @@ COLS = "2.3fr 0.9fr 1.1fr 0.7fr 0.7fr 0.7fr 1.1fr 1.15fr 1fr"
 def _load_issues() -> pd.DataFrame:
     df = pd.read_sql("SELECT * FROM issues_raw", engine)
     return prepare_df(df)
+
 
 
 def _miss(v) -> bool:
@@ -447,7 +448,7 @@ def main():
         '<div>'
         '<div style="font-weight:700;font-size:13px;color:#0f172a;margin-bottom:8px;">'
         'Lead Time for Changes'
-        '<span style="font-weight:400;color:#94a3b8;font-size:11px;"> (dias &#250;teis)</span>'
+        '<span style="font-weight:400;color:#94a3b8;font-size:11px;"> (cria&#231;&#227;o &#8594; entrega)</span>'
         '</div>'
         '<div style="font-size:13px;line-height:1.9;color:#334155;">'
         + dot(ec) + ' Elite: &lt; 1 dia<br>'
