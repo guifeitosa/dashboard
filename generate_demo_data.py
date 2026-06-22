@@ -255,16 +255,142 @@ def generate(
     return df
 
 
+def generate_transitions(df_issues: pd.DataFrame, seed: int = 43) -> pd.DataFrame:
+    """Generate realistic status transitions for resolved padrao issues.
+
+    Covers:
+    - 85% of padrao issues go through Sprint Backlog (15% skip → fallback_start=created)
+    - 80% of padrao issues go through Revisão de Produto (20% skip → fallback_end=Concluído)
+    - DEV/Bug-Dev: Sprint Backlog → Em desenvolvimento → Code Review → Concluído
+    - QA: Sprint Backlog → Em desenvolvimento → Concluído
+    """
+    rng = random.Random(seed)
+    rows: list[dict] = []
+
+    for _, issue in df_issues.iterrows():
+        itype = issue.get("issuetype", "")
+        key = issue.get("key", "")
+        created = pd.Timestamp(issue["created"]).to_pydatetime()
+        resdate_raw = issue.get("resolutiondate")
+
+        try:
+            if resdate_raw is None or pd.isna(resdate_raw):
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        resdate = pd.Timestamp(resdate_raw).to_pydatetime()
+        total_secs = (resdate - created).total_seconds()
+        if total_secs <= 0:
+            continue
+
+        def _tr(frm, to, ts):
+            rows.append({"issue_key": key, "from_status": frm, "to_status": to, "changed_at": ts})
+
+        if itype in PADRAO_TYPES:
+            # Sprint Backlog (85% chance; 15% skip = fallback to created)
+            if rng.random() < 0.85:
+                sb_ts = created + datetime.timedelta(seconds=rng.uniform(0, 0.08 * total_secs))
+                _tr("Backlog", "Sprint Backlog", sb_ts)
+                prev = "Sprint Backlog"
+            else:
+                prev = "Backlog"  # will start directly in dev
+
+            # Em desenvolvimento
+            dev_frac = rng.uniform(0.10, 0.35)
+            dev_ts = created + datetime.timedelta(seconds=dev_frac * total_secs)
+            _tr(prev, "Em desenvolvimento", dev_ts)
+
+            # Revisão de Produto (80% chance; 20% skip → cycle time uses Concluído)
+            if rng.random() < 0.80:
+                rp_frac = rng.uniform(0.70, 0.90)
+                rp_ts = created + datetime.timedelta(seconds=rp_frac * total_secs)
+                _tr("Em testes", "Revisão de Produto", rp_ts)
+                last = "Revisão de Produto"
+            else:
+                last = "Em desenvolvimento"
+
+            _tr(last, "Concluído", resdate)
+
+        elif itype in ("DEV", "Bug-Dev"):
+            dev_ts = created + datetime.timedelta(seconds=rng.uniform(0.05, 0.20) * total_secs)
+            _tr("Sprint Backlog", "Em desenvolvimento", dev_ts)
+            cr_ts = created + datetime.timedelta(seconds=rng.uniform(0.65, 0.85) * total_secs)
+            _tr("Em desenvolvimento", "Code Review", cr_ts)
+            _tr("Code Review", "Concluído", resdate)
+
+        elif itype == "QA":
+            dev_ts = created + datetime.timedelta(seconds=rng.uniform(0.10, 0.30) * total_secs)
+            _tr("Sprint Backlog", "Em desenvolvimento", dev_ts)
+            _tr("Em desenvolvimento", "Concluído", resdate)
+
+    if not rows:
+        return pd.DataFrame(columns=["issue_key", "from_status", "to_status", "changed_at"])
+    df_tr = pd.DataFrame(rows)
+    df_tr["changed_at"] = pd.to_datetime(df_tr["changed_at"])
+    return df_tr
+
+
+def _populate_metric_snapshots(df: pd.DataFrame, df_transitions: pd.DataFrame, engine) -> None:
+    """Derive metric_snapshots from real core_metrics functions and write to DB."""
+    import datetime as _dt
+    from metrics import calculate_metrics_summary
+    _METRIC_COLUMNS = [
+        ("mttr", "mttr_hours"),
+        ("cfr", "cfr_percent"),
+        ("lead_time", "lead_time_days"),
+        ("deployment_count", "deployment_count"),
+    ]
+
+    summary = calculate_metrics_summary(df)
+    if summary.empty:
+        return
+
+    rows = []
+    now = _dt.datetime.utcnow()
+    for _, row in summary.iterrows():
+        period = row["year_month"]
+        team = row["team"]
+        for metric_name, col in _METRIC_COLUMNS:
+            val = row.get(col)
+            if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                rows.append({
+                    "period": period,
+                    "team": team,
+                    "metric_name": metric_name,
+                    "value": float(val),
+                    "computed_at": now,
+                    "finalized": True,
+                })
+
+    if rows:
+        from sqlalchemy import insert as _insert, Table as _Table, MetaData as _Meta
+        meta = _Meta()
+        meta.reflect(bind=engine)
+        snap_tbl = meta.tables["metric_snapshots"]
+        with engine.begin() as conn:
+            conn.execute(snap_tbl.insert(), rows)
+
+
 def save_to_db(df: pd.DataFrame, db_path: str = "metrics_demo.db") -> None:
+    from db import Base
     engine = create_engine(f"sqlite:///{db_path}")
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS issues_raw"))
         conn.execute(text("DROP TABLE IF EXISTS issue_transitions"))
         conn.execute(text("DROP TABLE IF EXISTS metric_snapshots"))
-    df.drop(columns=["is_resolved", "year_month"], errors="ignore").to_sql(
-        "issues_raw", engine, if_exists="replace", index=False
-    )
+    Base.metadata.create_all(engine)  # ensures metric_snapshots schema is created
+
+    df_clean = df.drop(columns=["is_resolved", "year_month"], errors="ignore")
+    df_clean.to_sql("issues_raw", engine, if_exists="replace", index=False)
+
+    df_transitions = generate_transitions(df)
+    df_transitions.to_sql("issue_transitions", engine, if_exists="replace", index=False)
+
+    _populate_metric_snapshots(df, df_transitions, engine)
+
     print(f"[OK] {len(df)} issues written to {db_path}")
+    print(f"[OK] {len(df_transitions)} transitions written to {db_path}")
     _print_summary(df)
 
 

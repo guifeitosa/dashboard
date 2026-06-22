@@ -114,6 +114,8 @@ def dora_band(key: str, value) -> str:
         return "Elite" if v < 1 else "High" if v < 24 else "Medium" if v < 168 else "Low"
     if key == "cfr_percent":
         return "Elite" if v <= 15 else "High" if v <= 30 else "Medium" if v <= 45 else "Low"
+    if key == "cycle_time_days":
+        return "Elite" if v < 1 else "High" if v <= 3 else "Medium" if v <= 7 else "Low"
     return "N/A"
 
 

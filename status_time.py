@@ -156,6 +156,165 @@ def lead_time_real(
     return None
 
 
+# ── Lead Time & Cycle Time via transitions ────────────────────────────────────
+
+def _first_transition_to(transitions: list[dict], status: str) -> Optional[datetime]:
+    """Return the timestamp of the FIRST transition whose to_status matches."""
+    for tr in sorted(transitions, key=lambda t: t["changed_at"]):
+        if tr.get("to_status") == status:
+            return tr["changed_at"]
+    return None
+
+
+def _first_transition_to_after(
+    transitions: list[dict], status: str, after: datetime
+) -> Optional[datetime]:
+    """Return the first transition to `status` that occurs strictly after `after`."""
+    for tr in sorted(transitions, key=lambda t: t["changed_at"]):
+        if tr["changed_at"] > after and tr.get("to_status") == status:
+            return tr["changed_at"]
+    return None
+
+
+def _build_trans_lookup(df_transitions: Optional[pd.DataFrame]) -> dict[str, list[dict]]:
+    """Convert df_transitions DataFrame into a dict keyed by issue_key."""
+    lookup: dict[str, list[dict]] = {}
+    if df_transitions is None or df_transitions.empty:
+        return lookup
+    for _, row in df_transitions.iterrows():
+        key = str(row.get("issue_key", ""))
+        if not key:
+            continue
+        raw_ts = row.get("changed_at")
+        try:
+            if pd.isna(raw_ts):
+                continue
+        except (TypeError, ValueError):
+            pass
+        try:
+            if isinstance(raw_ts, datetime):
+                changed_at = raw_ts.replace(tzinfo=None) if raw_ts.tzinfo else raw_ts
+            else:
+                changed_at = pd.Timestamp(raw_ts).to_pydatetime().replace(tzinfo=None)
+        except Exception:
+            continue
+        lookup.setdefault(key, []).append({
+            "from_status": row.get("from_status"),
+            "to_status": row.get("to_status"),
+            "changed_at": changed_at,
+        })
+    return lookup
+
+
+def calculate_lead_and_cycle_time(
+    df_issues: pd.DataFrame,
+    df_transitions: Optional[pd.DataFrame],
+    issuetype: Optional[str] = None,
+    team: Optional[str] = None,
+) -> pd.DataFrame:
+    """Compute lead_time_days and cycle_time_days per resolved issue via transitions.
+
+    Columns returned: issue_key | issuetype | team | lead_time_days | cycle_time_days | res_month
+
+    Groups with ``lead_time: null`` in config (GMUD, Incidente, subtasks) are excluded.
+    When df_transitions is None/empty, falls back to created→resolutiondate for lead time
+    and leaves cycle_time_days as NaN.
+    """
+    from config import get_config as _get_config  # lazy — avoids circular import at load
+
+    _COLS = ["issue_key", "issuetype", "team", "lead_time_days", "cycle_time_days", "res_month"]
+    _EMPTY = pd.DataFrame(columns=_COLS)
+
+    if df_issues is None or df_issues.empty:
+        return _EMPTY
+
+    cfg = _get_config()
+    use_transitions = df_transitions is not None and not df_transitions.empty
+    trans_lookup = _build_trans_lookup(df_transitions)
+
+    rows: list[dict] = []
+
+    for _, row in df_issues.iterrows():
+        itype = str(row.get("issuetype", ""))
+        if issuetype is not None and itype != issuetype:
+            continue
+
+        row_team = row.get("team")
+        if team is not None and row_team != team:
+            continue
+
+        lt_cfg = cfg.lead_time_config(itype)
+        if lt_cfg is None:
+            continue  # GMUD, Incidente, subtasks — not measured
+
+        ct_cfg = cfg.cycle_time_config(itype)
+
+        # Must be resolved
+        resdate_raw = row.get("resolutiondate")
+        try:
+            if pd.isna(resdate_raw):
+                continue
+        except (TypeError, ValueError):
+            if resdate_raw is None:
+                continue
+
+        try:
+            created_dt: datetime = pd.Timestamp(row.get("created")).to_pydatetime().replace(tzinfo=None)
+            resdate_dt: datetime = pd.Timestamp(resdate_raw).to_pydatetime().replace(tzinfo=None)
+        except Exception:
+            continue
+
+        key = str(row.get("key", row.get("issue_key", "")))
+        transitions = trans_lookup.get(key, [])
+
+        # ── Lead Time ─────────────────────────────────────────────────────────
+        lt_start = _first_transition_to(transitions, lt_cfg["start_status"])
+        if lt_start is None:
+            if lt_cfg.get("fallback_start") == "created":
+                lt_start = created_dt
+            else:
+                continue
+
+        lt_end = _first_transition_to_after(transitions, lt_cfg["end_status"], lt_start)
+        if lt_end is None:
+            if not use_transitions:
+                lt_end = resdate_dt  # no transitions at all — use resolutiondate
+            else:
+                continue  # transitions exist but issue never reached end_status
+
+        if lt_end < lt_start:
+            continue
+
+        lead_days = float(max(1, len(pd.bdate_range(start=lt_start.date(), end=lt_end.date()))))
+
+        # ── Cycle Time ────────────────────────────────────────────────────────
+        cycle_days: Optional[float] = None
+        if ct_cfg is not None:
+            ct_start = _first_transition_to(transitions, ct_cfg["start_status"])
+            if ct_start is not None:
+                ct_end = _first_transition_to_after(transitions, ct_cfg["end_status"], ct_start)
+                if ct_end is None and ct_cfg.get("fallback_end"):
+                    ct_end = _first_transition_to_after(transitions, ct_cfg["fallback_end"], ct_start)
+                if ct_end is None and not use_transitions:
+                    ct_end = resdate_dt
+                if ct_end is not None and ct_end >= ct_start:
+                    cycle_days = float(max(1, len(pd.bdate_range(
+                        start=ct_start.date(), end=ct_end.date()
+                    ))))
+
+        res_month = resdate_dt.strftime("%Y-%m")
+        rows.append({
+            "issue_key": key,
+            "issuetype": itype,
+            "team": row_team,
+            "lead_time_days": lead_days,
+            "cycle_time_days": cycle_days if cycle_days is not None else float("nan"),
+            "res_month": res_month,
+        })
+
+    return pd.DataFrame(rows, columns=_COLS) if rows else _EMPTY
+
+
 # ── WIP history helpers ───────────────────────────────────────────────────────
 
 def build_issue_records(

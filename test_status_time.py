@@ -8,7 +8,14 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from status_time import average_time_in_status, lead_time_real, time_in_status
+import pandas as pd
+
+from status_time import (
+    average_time_in_status,
+    calculate_lead_and_cycle_time,
+    lead_time_real,
+    time_in_status,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -280,3 +287,170 @@ class TestAverageTimeInStatus:
 
         # Review: only TD-1 visited it (3h) → average = 3h (not 1.5h)
         assert result["Review"] == timedelta(hours=3)
+
+
+# ===========================================================================
+# calculate_lead_and_cycle_time
+# ===========================================================================
+
+# Base date for these tests (a Monday so bdate arithmetic is predictable)
+_BASE = datetime(2026, 6, 1, 0, 0, 0)  # Monday
+
+
+def _d(days: float) -> datetime:
+    return _BASE + timedelta(days=days)
+
+
+def _issue_df(**kwargs) -> pd.DataFrame:
+    defaults = {
+        "key": "TD-1",
+        "issuetype": "História",
+        "team": "Alpha",
+        "created": _BASE,
+        "resolutiondate": _d(10),
+        "is_resolved": True,
+        "year_month": "2026-06",
+        "status": "Concluído",
+    }
+    defaults.update(kwargs)
+    return pd.DataFrame([defaults])
+
+
+def _tr_df(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(rows)
+
+
+def _tr(issue_key, frm, to, days_offset) -> dict:
+    return {
+        "issue_key": issue_key,
+        "from_status": frm,
+        "to_status": to,
+        "changed_at": _d(days_offset),
+    }
+
+
+class TestCalculateLeadAndCycleTime:
+
+    def test_lead_time_normal_via_transitions(self):
+        """Em desenvolvimento → Concluído via transitions — lead time is that window."""
+        df_i = _issue_df(created=_d(0), resolutiondate=_d(10))
+        df_t = _tr_df([
+            _tr("TD-1", "Sprint Backlog", "Em desenvolvimento", 2),
+            _tr("TD-1", "Em desenvolvimento", "Revisão de Produto", 7),
+            _tr("TD-1", "Revisão de Produto", "Concluído", 10),
+        ])
+        result = calculate_lead_and_cycle_time(df_i, df_t)
+        assert len(result) == 1
+        row = result.iloc[0]
+        # Lead: Em desenvolvimento (day 2) → Concluído (day 10)
+        assert row["lead_time_days"] > 0
+        assert pd.notna(row["lead_time_days"])
+
+    def test_lead_time_fallback_created(self):
+        """No Em desenvolvimento transition → fallback_start=created → lead time from created."""
+        df_i = _issue_df(created=_d(0), resolutiondate=_d(6))
+        df_t = _tr_df([
+            _tr("TD-1", "Backlog", "Sprint Backlog", 0.5),   # no Em desenvolvimento
+            _tr("TD-1", "Sprint Backlog", "Concluído", 6),
+        ])
+        result = calculate_lead_and_cycle_time(df_i, df_t)
+        assert len(result) == 1
+        assert result.iloc[0]["lead_time_days"] > 0
+
+    def test_lead_time_none_when_issue_still_open(self):
+        """Open issue (no resolutiondate) → excluded from result."""
+        df_i = _issue_df(resolutiondate=None, is_resolved=False)
+        df_t = _tr_df([_tr("TD-1", "Backlog", "Sprint Backlog", 0.5)])
+        result = calculate_lead_and_cycle_time(df_i, df_t)
+        assert result.empty
+
+    def test_cycle_time_normal_dev_to_revisao(self):
+        """Em desenvolvimento → Revisão de Produto is the cycle time window."""
+        df_i = _issue_df(created=_d(0), resolutiondate=_d(10))
+        df_t = _tr_df([
+            _tr("TD-1", "Backlog", "Sprint Backlog", 0.5),
+            _tr("TD-1", "Sprint Backlog", "Em desenvolvimento", 2),
+            _tr("TD-1", "Em desenvolvimento", "Revisão de Produto", 7),
+            _tr("TD-1", "Revisão de Produto", "Concluído", 10),
+        ])
+        result = calculate_lead_and_cycle_time(df_i, df_t)
+        # Cycle: Em desenvolvimento (day 2) → Revisão de Produto (day 7)
+        assert pd.notna(result.iloc[0]["cycle_time_days"])
+        assert result.iloc[0]["cycle_time_days"] > 0
+
+    def test_cycle_time_fallback_concluido(self):
+        """No Revisão de Produto transition → cycle time uses fallback Concluído."""
+        df_i = _issue_df(created=_d(0), resolutiondate=_d(8))
+        df_t = _tr_df([
+            _tr("TD-1", "Backlog", "Sprint Backlog", 0.5),
+            _tr("TD-1", "Sprint Backlog", "Em desenvolvimento", 2),
+            _tr("TD-1", "Em desenvolvimento", "Concluído", 8),
+        ])
+        result = calculate_lead_and_cycle_time(df_i, df_t)
+        assert len(result) == 1
+        assert pd.notna(result.iloc[0]["cycle_time_days"])
+
+    def test_cycle_time_nan_when_no_em_desenvolvimento(self):
+        """Issue that never entered Em desenvolvimento → cycle_time_days is NaN."""
+        df_i = _issue_df(created=_d(0), resolutiondate=_d(5))
+        df_t = _tr_df([
+            _tr("TD-1", "Backlog", "Sprint Backlog", 0.5),
+            _tr("TD-1", "Sprint Backlog", "Concluído", 5),
+        ])
+        result = calculate_lead_and_cycle_time(df_i, df_t)
+        assert len(result) == 1
+        assert pd.isna(result.iloc[0]["cycle_time_days"])
+
+    def test_gmud_returns_empty(self):
+        """GMUD has lead_time: null → excluded entirely."""
+        df_i = _issue_df(issuetype="GMUD")
+        df_t = _tr_df([_tr("TD-1", "Sprint Backlog", "Implantado com Sucesso", 5)])
+        result = calculate_lead_and_cycle_time(df_i, df_t)
+        assert result.empty
+
+    def test_incidente_returns_empty(self):
+        """Incidente has lead_time: null → excluded."""
+        df_i = _issue_df(issuetype="Incidente")
+        df_t = _tr_df([_tr("TD-1", "Sprint Backlog", "Concluído", 3)])
+        result = calculate_lead_and_cycle_time(df_i, df_t)
+        assert result.empty
+
+    def test_subtask_dev_returns_empty(self):
+        """DEV subtask has lead_time: null → excluded."""
+        df_i = _issue_df(issuetype="DEV")
+        df_t = _tr_df([_tr("TD-1", "Em desenvolvimento", "Concluído", 2)])
+        result = calculate_lead_and_cycle_time(df_i, df_t)
+        assert result.empty
+
+    def test_team_filter(self):
+        """team= filter includes only matching rows."""
+        df_i = pd.DataFrame([
+            {**_issue_df(key="TD-1", team="Alpha").iloc[0].to_dict(), "key": "TD-1"},
+            {**_issue_df(key="TD-2", team="Beta").iloc[0].to_dict(), "key": "TD-2"},
+        ])
+        df_t = _tr_df([
+            _tr("TD-1", "Backlog", "Sprint Backlog", 0.5),
+            _tr("TD-1", "Sprint Backlog", "Concluído", 10),
+            _tr("TD-2", "Backlog", "Sprint Backlog", 0.5),
+            _tr("TD-2", "Sprint Backlog", "Concluído", 10),
+        ])
+        result = calculate_lead_and_cycle_time(df_i, df_t, team="Alpha")
+        assert len(result) == 1
+        assert result.iloc[0]["team"] == "Alpha"
+
+    def test_business_days_excludes_weekends(self):
+        """Lead time spanning a weekend must count only business days."""
+        # _BASE is Monday 2026-06-01
+        # Em desenvolvimento on Tuesday (day 1), Concluído on next Monday (day 7)
+        # Business days: Tue, Wed, Thu, Fri, Mon = 5 business days (≤ 7)
+        monday_start = _BASE
+        next_monday = _BASE + timedelta(days=7)
+        df_i = _issue_df(created=monday_start, resolutiondate=next_monday)
+        df_t = _tr_df([
+            _tr("TD-1", "Sprint Backlog", "Em desenvolvimento", 1),  # Tuesday
+            _tr("TD-1", "Em desenvolvimento", "Concluído", 7),        # next Monday
+        ])
+        result = calculate_lead_and_cycle_time(df_i, df_t)
+        assert len(result) == 1
+        # Tue → Mon: spans weekend (Sat+Sun excluded) → 5 business days
+        assert result.iloc[0]["lead_time_days"] <= 7

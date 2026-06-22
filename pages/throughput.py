@@ -9,6 +9,7 @@ from core_metrics import (
     prepare_df,
 )
 from db import engine
+from status_time import calculate_lead_and_cycle_time
 from components.context_bar import render_context_bar
 from squad_health import render_squad_health
 
@@ -41,6 +42,14 @@ CAUSE_COLORS = {
 def _load_issues() -> pd.DataFrame:
     df = pd.read_sql("SELECT * FROM issues_raw", engine)
     return prepare_df(df)
+
+
+@st.cache_data(ttl=300)
+def _load_transitions() -> pd.DataFrame:
+    try:
+        return pd.read_sql("SELECT * FROM issue_transitions", engine)
+    except Exception:
+        return pd.DataFrame()
 
 
 def fmt_month(ym: str) -> str:
@@ -92,7 +101,9 @@ def _consecutive_tail(values: list, pred) -> int:
 
 
 @st.dialog("Detalhes do Mês", width="large")
-def _month_detail(month_ym: str, filt_df: pd.DataFrame, monthly_df: pd.DataFrame) -> None:
+def _month_detail(
+    month_ym: str, filt_df: pd.DataFrame, monthly_df: pd.DataFrame, lc_df: pd.DataFrame
+) -> None:
     st.markdown(
         f'<div style="font-size:20px;font-weight:800;color:#0f172a;margin-bottom:16px;">'
         f'{fmt_month(month_ym)}</div>',
@@ -102,9 +113,13 @@ def _month_detail(month_ym: str, filt_df: pd.DataFrame, monthly_df: pd.DataFrame
     m_data = filt_df[filt_df["res_month"] == month_ym].copy()
     month_total = len(m_data)
 
-    m_data["ct"] = (
-        (m_data["resolutiondate"] - m_data["created"]).dt.total_seconds() / 86400
-    )
+    if not lc_df.empty and "issue_key" in lc_df.columns:
+        ct_map = lc_df.set_index("issue_key")["cycle_time_days"]
+        m_data["ct"] = m_data["key"].map(ct_map)
+    else:
+        m_data["ct"] = (
+            (m_data["resolutiondate"] - m_data["created"]).dt.total_seconds() / 86400
+        )
     avg_ct = m_data["ct"].mean()
 
     sorted_months = sorted(monthly_df["res_month"].tolist())
@@ -197,6 +212,8 @@ def main():
     _ctx = st.empty()
 
     df = _load_issues()
+    df_transitions = _load_transitions()
+    lc_df = calculate_lead_and_cycle_time(df, df_transitions)
 
     resolved = df[df["is_resolved"]].copy()
     resolved["res_month"] = resolved["resolutiondate"].dt.to_period("M").astype(str)
@@ -387,6 +404,81 @@ def main():
 
     st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
 
+    # ── Métricas de Fluxo (Lead Time & Cycle Time via transições) ─────────────
+    lc_team = lc_df.copy()
+    if selected_team != "Todos":
+        lc_team = lc_team[lc_team["team"] == selected_team]
+
+    lc_curr = lc_team[
+        (lc_team["res_month"] >= selected_start) & (lc_team["res_month"] <= selected_end)
+    ]
+
+    lt_avg = lc_curr["lead_time_days"].mean() if not lc_curr.empty else None
+    ct_avg = lc_curr["cycle_time_days"].mean() if not lc_curr.empty else None
+
+    # Previous period of same length (for trend delta)
+    try:
+        sp = pd.Period(selected_start, freq="M")
+        ep = pd.Period(selected_end, freq="M")
+        period_len = int(ep - sp) + 1
+        prev_end = sp - 1
+        prev_start = prev_end - (period_len - 1)
+        lc_prev = lc_team[
+            (lc_team["res_month"] >= str(prev_start)) &
+            (lc_team["res_month"] <= str(prev_end))
+        ]
+        lt_prev = lc_prev["lead_time_days"].mean() if not lc_prev.empty else None
+        ct_prev = lc_prev["cycle_time_days"].mean() if not lc_prev.empty else None
+    except Exception:
+        lt_prev = ct_prev = None
+
+    def _flow_delta(cur, prev):
+        if cur is None or prev is None or pd.isna(cur) or pd.isna(prev) or prev == 0:
+            return "", "#94a3b8"
+        delta_pct = (cur - prev) / prev * 100
+        if delta_pct < -1:
+            return f"↓ {abs(delta_pct):.0f}%", "#15803d"   # green — improving (lower is better)
+        if delta_pct > 1:
+            return f"↑ {abs(delta_pct):.0f}%", "#dc2626"   # red — worsening
+        return "→ estável", "#94a3b8"
+
+    def _fmt_d(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return "—"
+        return f"{v:.1f}d"
+
+    lt_badge, lt_badge_color = _flow_delta(lt_avg, lt_prev)
+    ct_badge, ct_badge_color = _flow_delta(ct_avg, ct_prev)
+
+    st.markdown(
+        '<div style="font-size:11px;font-weight:700;color:#94a3b8;'
+        'text-transform:uppercase;letter-spacing:.07em;margin:12px 0 6px;">'
+        'Métricas de Fluxo</div>',
+        unsafe_allow_html=True,
+    )
+
+    mf1, mf2, _, _, _, _, _ = st.columns(7)
+    with mf1:
+        st.html(_card(
+            "Lead Time",
+            f'<span style="color:#0f172a;">{_fmt_d(lt_avg)}</span>',
+            sub='Em desenvolvimento &#8594; Conclu&#237;do<br>'
+                '<span style="font-size:10px;color:#94a3b8;">tempo m&#233;dio at&#233; entrega</span>',
+            badge=lt_badge,
+            badge_color=lt_badge_color,
+        ))
+    with mf2:
+        st.html(_card(
+            "Cycle Time",
+            f'<span style="color:#0f172a;">{_fmt_d(ct_avg)}</span>',
+            sub='Em desenvolvimento &#8594; Revis&#227;o de Produto<br>'
+                '<span style="font-size:10px;color:#94a3b8;">tempo m&#233;dio de execu&#231;&#227;o t&#233;cnica</span>',
+            badge=ct_badge,
+            badge_color=ct_badge_color,
+        ))
+
+    st.markdown("<div style='margin-top:4px;'></div>", unsafe_allow_html=True)
+
     # ── Bar chart with click-to-drill-down ───────────────────────────────────
     if "tp_last_clicked" not in st.session_state:
         st.session_state.tp_last_clicked = None
@@ -447,7 +539,7 @@ def main():
     clicked = sel_items[0].get("res_month") if sel_items else None
     if clicked and clicked != st.session_state.tp_last_clicked:
         st.session_state.tp_last_clicked = clicked
-        _month_detail(clicked, filt, monthly)
+        _month_detail(clicked, filt, monthly, lc_df)
     elif not clicked:
         st.session_state.tp_last_clicked = None
 
@@ -647,9 +739,13 @@ def main():
     )
 
     filt = filt.copy()
-    filt["cycle_time_dias"] = (
-        (filt["resolutiondate"] - filt["created"]).dt.total_seconds() / 86400
-    ).round(1)
+    if not lc_df.empty and "issue_key" in lc_df.columns:
+        ct_map = lc_df.set_index("issue_key")["cycle_time_days"]
+        filt["cycle_time_dias"] = filt["key"].map(ct_map).round(1)
+    else:
+        filt["cycle_time_dias"] = (
+            (filt["resolutiondate"] - filt["created"]).dt.total_seconds() / 86400
+        ).round(1)
 
     table = (
         filt.sort_values("resolutiondate", ascending=False)
